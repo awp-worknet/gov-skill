@@ -238,5 +238,38 @@ Any divergence trips the test — the skill will not build until it's fixed.
   through `awp-wallet sign-typed-data`.
 - Send `http://` or `ws://` URLs. The skill rejects them in
   `scripts/lib/govnet_lib.py::_enforce_https`.
+- **Follow HTTP redirects.** `urllib`'s default `HTTPRedirectHandler` would
+  forward all five `X-EMG-*` signed headers to whatever target a 30x
+  response points at — a misconfigured DNS or active MitM that returns
+  `302 Location: https://attacker.example/v1/orders` would receive a
+  valid signature for the original request. The module-level `_OPENER` in
+  `govnet_lib.py` installs a `_NoRedirectHandler` that raises
+  `EmgError(INSECURE_REDIRECT)` on any 30x. If the production endpoint
+  truly needs to relocate, change DNS / load-balancer / `GOVNET_API_BASE`
+  — never depend on a 30x.
 - Bypass the confirm-before-irreversible prompt. Every signed write needs an
   explicit `y` (interactive) or `--yes` (non-interactive) consent.
+
+## Client-side retry & rate-limit semantics
+
+`signed_request` auto-retries exactly twice in two cases, each at most
+once per logical call:
+
+- **`NONCE_TOO_LOW` / `AUTH_NONCE_TOO_LOW` / `NONCE_CONFLICT`** (HTTP 401/409):
+  refresh `/v1/auth/info`, call `nonce.bump_to(server_stored)`, retry once.
+  Surfaces unchanged on second failure.
+- **HTTP 429** (`RATE_LIMIT_EXCEEDED` / `RATE_LIMIT_BACKPRESSURE`): parse
+  `Retry-After` header (delta-seconds OR HTTP-date format), `time.sleep`
+  for at most 60 seconds (safety cap to defend against misconfigured
+  servers parking the client), allocate a fresh nonce, retry once.
+
+5xx responses with `X-EMG-Nonce-Burned: true` cause an immediate
+`nonce.bump_to(used_nonce)` so a subsequent fresh call doesn't reuse the
+burned nonce. Other 5xx surface to the caller without retry.
+
+Pagination follows `pagination.has_more` as the **authoritative** stop
+signal (per OpenAPI `Pagination` schema, `has_more` is required while
+`next_cursor` is nullable + non-required). `paginate_all` walks pages
+until `has_more === false` OR the cursor is empty. Default cap is 100
+pages — when hit, the response carries `truncated_at_max_pages: true`
+plus the next cursor so the agent can resume manually.

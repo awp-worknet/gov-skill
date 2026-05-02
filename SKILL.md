@@ -109,14 +109,14 @@ $ python3 scripts/helpers/what-can-i-do.py
 | `public/book.py`                        | GET    | `/v1/markets/{m}/worknets/{wn}/book`                            | —    |
 | `public/klines.py`                      | GET    | `/v1/markets/{m}/worknets/{wn}/klines`                          | —    |
 | `public/worknets.py`                    | GET    | `/v1/worknets`                                                  | —    |
-| `public/epochs.py`                      | GET    | `/v1/epochs/current`, `/v1/epochs/{id}`, `…/phase`, `…/results` | —    |
-| `public/leaderboard.py`                 | GET    | `/v1/leaderboard/epistemic`                                     | —    |
+| `public/epochs.py`                      | GET    | `/v1/epochs/current`, `/v1/epochs/{id}`, `…/phase`, `…/results`, `…/voters`†, `…/votes/{principal}/history`† | —    |
+| `public/leaderboard.py`†                | GET    | `/v1/leaderboard/epistemic`                                     | —    |
 | `public/merkle.py`                      | GET    | `/v1/epochs/{id}/merkle-root`, `…/votes/{principal}/proof`       | —    |
 | `private/state.py`                      | GET    | `/v1/principals/{me}/state`                                     | sig  |
 | `private/power.py`                      | GET    | `/v1/principals/{me}/power`                                     | sig  |
 | `private/managers.py`                   | GET    | `/v1/principals/{me}/managers`                                  | sig  |
 | `private/recipient.py`                  | GET    | `/v1/principals/{me}/recipient`                                 | sig  |
-| `private/orders-list.py`                | GET    | `/v1/orders`                                                    | sig  |
+| `private/orders-list.py`†               | GET    | `/v1/orders`                                                    | sig  |
 | `private/orders-get.py`                 | GET    | `/v1/orders/{id}`                                               | sig  |
 | `trade/submit-order.py`                 | POST   | `/v1/orders`                                                    | sig  |
 | `trade/cancel-order.py`                 | DELETE | `/v1/orders/{id}`                                               | sig  |
@@ -139,6 +139,14 @@ $ python3 scripts/helpers/what-can-i-do.py
 
 Every script emits a single JSON object (or one JSON-Lines stream for `stream/*`)
 to stdout so the calling agent can parse it directly.
+
+Scripts marked **†** support a `--all-pages` flag that walks
+`pagination.next_cursor` until exhausted and concatenates all `data[]` arrays
+into one response. `has_more === false` is the authoritative stop signal
+(see `references/api-shapes.md`). Default cap is 100 pages — when hit, the
+output carries `truncated_at_max_pages: true` plus `next_cursor` for resume.
+Private listings still cost one nonce per page (each page is a separately-signed
+request) — don't blindly enable `--all-pages` on huge listings.
 
 ---
 
@@ -221,20 +229,22 @@ normalize either form. `references/status-state-machine.md` has the full map.
 Map server `code` → user-facing action. Every signed-write script has the same
 retry policy:
 
-| Code (server)                                  | Action                                                                 |
-|------------------------------------------------|------------------------------------------------------------------------|
-| `AUTH_MISSING_HEADER`                          | Log and abort — skill bug.                                              |
-| `AUTH_SIGNATURE_INVALID`                       | Refresh `/v1/auth/info`, retry once. Else surface as a domain-mismatch. |
-| `AUTH_NONCE_TOO_LOW` / `NONCE_TOO_LOW`         | Bump local nonce floor + retry once.                                    |
-| `AUTH_TIMESTAMP_OUT_OF_WINDOW`                 | Print "your clock is X seconds off; sync NTP and retry."                |
-| `BUSINESS_PHASE_MISMATCH`                      | Surface phase + countdown to when the op opens again.                   |
-| `BUSINESS_INSUFFICIENT_BALANCE`                | Surface `chips_available`.                                              |
-| `STATE_PRINCIPAL_NOT_IN_EPOCH`                 | Suggest `awp-skill` to stake veAWP for next epoch.                      |
-| `RATE_LIMIT_EXCEEDED` / `RATE_LIMIT_BACKPRESSURE` | Honor `Retry-After` header; backoff with jitter.                     |
-| `STATE_RESULTS_NOT_FOUND`                      | Tell user to retry after settlement window.                             |
-| `INTERNAL_*` (5xx) with `X-EMG-Nonce-Burned`   | Bump nonce, retry once.                                                 |
+| Code                                              | Action                                                                                              |
+|---------------------------------------------------|-----------------------------------------------------------------------------------------------------|
+| `AUTH_MISSING_HEADER`                             | Log and abort — skill bug.                                                                          |
+| `AUTH_SIGNATURE_INVALID`                          | Refresh `/v1/auth/info`, retry once. Else surface as a domain-mismatch.                             |
+| `AUTH_NONCE_TOO_LOW` / `NONCE_TOO_LOW`            | `signed_request` auto: refresh auth-info, `bump_to(server_stored)`, retry once.                     |
+| `AUTH_TIMESTAMP_OUT_OF_WINDOW`                    | Print "your clock is X seconds off; sync NTP and retry."                                            |
+| `BUSINESS_PHASE_MISMATCH`                         | Surface phase + countdown to when the op opens again.                                               |
+| `BUSINESS_INSUFFICIENT_BALANCE`                   | Surface `chips_available`.                                                                          |
+| `STATE_PRINCIPAL_NOT_IN_EPOCH`                    | Suggest `awp-skill` to stake veAWP for next epoch.                                                  |
+| `RATE_LIMIT_EXCEEDED` / `RATE_LIMIT_BACKPRESSURE` | `signed_request` auto: parse `Retry-After` (delta-seconds OR HTTP-date), sleep ≤ 60s, retry once.   |
+| `STATE_RESULTS_NOT_FOUND`                         | Tell user to retry after settlement window.                                                         |
+| `INTERNAL_*` (5xx) with `X-EMG-Nonce-Burned`      | Bump nonce, surface error to caller (no auto-retry; idempotency unclear).                           |
+| `INSECURE_TRANSPORT` *(client)*                   | Set `GOVNET_API_BASE` / `GOVNET_WS_URL` to `https://` / `wss://`. Skill refuses plaintext.          |
+| `INSECURE_REDIRECT` *(client)*                    | Server returned 30x. Skill refuses to follow (signed headers would leak). Fix DNS / config upstream.|
 
-Full code → message map: `references/error-codes.md`.
+Full code → message map: `references/error-codes.md` (incl. client-emitted codes section).
 
 ---
 

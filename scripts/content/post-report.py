@@ -17,6 +17,7 @@ import argparse
 import json
 import sys
 import uuid
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -53,7 +54,15 @@ def main() -> int:
 
     body = {"worknet_id": args.worknet, "content": content, "metrics": metrics}
     if args.requested_share is not None:
-        body["requested_share"] = args.requested_share
+        # 服务端 schema 是 string format: decimal，但参数本身代表概率/份额，
+        # 必须在 [0, 1]。客户端先解析+范围检查，省去服务端 400 + 含糊错误信息。
+        try:
+            share = Decimal(args.requested_share)
+        except InvalidOperation:
+            ap.error(f"--requested-share {args.requested_share!r} is not a valid decimal")
+        if not (Decimal("0") <= share <= Decimal("1")):
+            ap.error(f"--requested-share must be in [0, 1]; got {share}")
+        body["requested_share"] = args.requested_share  # 原样发，保留 scale
 
     prompt = (
         "[TX] post weekly report:\n"

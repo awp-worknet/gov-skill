@@ -1,8 +1,23 @@
 #!/usr/bin/env python3
-"""订阅 fills.me / orders.me / account — 私有流（需 auth.hello 握手）。
+"""认证 WebSocket 会话 + 订阅任意 asyncapi 频道 —— 不仅限私有流。
 
     watch-private.py                         # 默认 fills.me + orders.me
-    watch-private.py --channels fills.me,account
+    watch-private.py --channels fills.me,orders.me,account
+    watch-private.py --channels phase,book.6.11   # 也可以混订公开频道
+
+asyncapi 支持的全部 8 个频道：
+    public            book.{m}.{wn}
+                      klines.{m}.{wn}.{interval}
+                      phase
+                      reports
+                      comments
+    auth required     fills.me
+                      orders.me
+                      account              # 自己的 PrincipalCurrentState 变更
+
+虽然脚本叫 watch-private，本质上是「先 auth.hello 再订阅」—— 一旦 session
+认证成功，订阅清单可以混入任意公开频道。如果只想订公开频道、不想出 nonce
+和签名 wallet，请改用 watch-book / watch-klines / watch-phase 之一。
 
 签名材料：method=WS_HELLO, path=/v1/ws — 注意 WS handshake 的 path **不**
 去 `/v1` 前缀（与 REST POST-strip 不同），原因见 SKILL.md "Critical
@@ -38,7 +53,11 @@ def main() -> int:
     ap.add_argument(
         "--channels",
         default="fills.me,orders.me",
-        help="comma-separated; supported: fills.me, orders.me, account",
+        help=(
+            "comma-separated; auth-required: fills.me, orders.me, account. "
+            "public (allowed on authed sessions too): "
+            "book.{m}.{wn}, klines.{m}.{wn}.{interval}, phase, reports, comments"
+        ),
     )
     args = ap.parse_args()
     channels = [c.strip() for c in args.channels.split(",") if c.strip()]
