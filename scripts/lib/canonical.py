@@ -48,7 +48,19 @@ def eip712_body_hash(body: bytes) -> bytes:
 
 
 def idempotency_body_hash(body: bytes) -> str:
-    """SHA-256 摘要，用于 idempotency cache key — 与 EIP-712 的 keccak256 严格区分。"""
+    """SHA-256 摘要，与 EIP-712 的 keccak256 严格区分（spec §9.4 步骤 1）。
+
+    **当前 skill 不直接调用本函数** —— 服务端用此摘要作为 idempotency
+    cache key 的一部分（`(Principal, X-Idempotency-Key, sha256(body))`），
+    客户端只需要原样复发同一个 body 即可命中缓存，不必自己算 hash。
+
+    保留这个函数是因为：
+      - spec §9.4 把它列为客户端"应当能算"的 reference 实现
+      - tests/test_canonical.py 用它锚定服务端兼容性（防止未来误把
+        keccak256 当成 idempotency hash —— 两个用不同算法是 spec 反复
+        强调的反混淆点）
+      - 将来如果加 client-side dedup / replay-protection 工具，可以直接复用
+    """
     return "0x" + hashlib.sha256(body).hexdigest()
 
 

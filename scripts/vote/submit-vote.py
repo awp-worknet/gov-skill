@@ -66,10 +66,17 @@ def main() -> int:
     ap.add_argument("--epoch", type=int, required=True)
     ap.add_argument("--vote", required=True, help="comma-separated probabilities")
     ap.add_argument("--prediction", required=True, help="comma-separated probabilities")
-    ap.add_argument("--vote-nonce", type=int, default=1, help="vote-level nonce (NOT EMG-SIG nonce)")
+    # 默认用当前 Unix 秒数 — 与 EMG-SIG-V1 transport nonce 是两个独立计数器，
+    # 但同样要求"严格大于上一次提交"；时间戳天然单调，省去用户手工跟踪历史
+    # 的负担。如果 1 秒内重投两次（罕见），用 --vote-nonce 显式指定即可。
+    ap.add_argument("--vote-nonce", type=int, default=None,
+                    help="vote-level nonce (NOT EMG-SIG nonce); defaults to current Unix seconds")
     ap.add_argument("--idem-key", default=str(uuid.uuid4()))
     ap.add_argument("--yes", action="store_true")
     args = ap.parse_args()
+    if args.vote_nonce is None:
+        import time
+        args.vote_nonce = int(time.time())
 
     try:
         vote = _parse_vector(args.vote)

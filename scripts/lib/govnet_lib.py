@@ -151,6 +151,54 @@ def fetch(method: str, path: str, *, params: Optional[Dict] = None, body: Option
         raise EmgError("MALFORMED_JSON", f"server returned non-JSON: {data[:200]!r}") from e
 
 
+# --- 自动翻页 ---------------------------------------------------------------
+
+
+def paginate_all(
+    fetch_page,
+    *,
+    initial_params: Optional[Dict] = None,
+    max_pages: int = 100,
+    data_key: str = "data",
+    pagination_key: str = "pagination",
+    cursor_key: str = "next_cursor",
+) -> Dict[str, Any]:
+    """跟着 `pagination.next_cursor` 取完所有页，把所有 data[] 拼回一个数组。
+
+    `fetch_page(params: dict) -> dict` 是调用方提供的回调，应返回服务端的
+    分页响应（含 `data[]` 和 `pagination.next_cursor`）。本函数不关心是
+    `fetch()` 还是 `signed_request()` 拉的，让公开/私有列表都能复用。
+
+    `max_pages` 是防呆 —— 数据量异常大或服务端 cursor 出 bug 死循环时
+    强制截断；超过会在返回的 dict 里加 `truncated_at_max_pages: true`，
+    调用方/agent 自己判断要不要翻更多。
+
+    返回 `{data: [...合并...], pagination: {...最后一页的...}, page_count: N}`，
+    保留服务端原本响应的字段（除了 data，data 是合并的）。
+    """
+    params = dict(initial_params or {})
+    aggregated: list = []
+    last_resp: Dict[str, Any] = {}
+    pages = 0
+    while pages < max_pages:
+        last_resp = fetch_page(params)
+        pages += 1
+        items = last_resp.get(data_key, []) or []
+        aggregated.extend(items)
+        cursor = (last_resp.get(pagination_key) or {}).get(cursor_key)
+        if not cursor:
+            break
+        params = dict(params)
+        params["cursor"] = cursor
+    out: Dict[str, Any] = {data_key: aggregated, "page_count": pages}
+    if pages == max_pages and (last_resp.get(pagination_key) or {}).get(cursor_key):
+        out["truncated_at_max_pages"] = True
+        out["next_cursor"] = (last_resp.get(pagination_key) or {}).get(cursor_key)
+    if pagination_key in last_resp:
+        out[pagination_key] = last_resp[pagination_key]
+    return out
+
+
 # --- auth info 缓存 ----------------------------------------------------------
 
 
