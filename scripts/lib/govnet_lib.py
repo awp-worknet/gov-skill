@@ -16,6 +16,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from datetime import datetime, timezone
 from decimal import Decimal, ROUND_HALF_EVEN
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
@@ -136,7 +137,9 @@ def fetch(method: str, path: str, *, params: Optional[Dict] = None, body: Option
     raw_body: Optional[bytes] = None
     headers: Dict[str, str] = {"Accept": "application/json", "User-Agent": "govnet-skill/0.1"}
     if body is not None:
-        raw_body = json.dumps(body).encode("utf-8")
+        # 紧凑 JSON 与 signed_request 一致 —— 让来日万一从 fetch 改走签名路径
+        # 时不会因为 separator 不同而 bodyHash 漂移
+        raw_body = json.dumps(body, separators=(",", ":")).encode("utf-8")
         headers["Content-Type"] = "application/json"
 
     status, data, _hdrs = _request(method, url, headers=headers, body=raw_body)
@@ -267,10 +270,41 @@ def signed_request(
             )
             new = nonce_mod.bump_to(principal, max(stored, nonce))
             return _attempt(new)
+        if err.status == 429:
+            # 服务端 rate-limit；honor Retry-After header（秒），上限 60s 防呆
+            wait = _parse_retry_after(err.headers.get("Retry-After"))
+            time.sleep(wait)
+            new_nonce = nonce_mod.next_nonce(principal)
+            return _attempt(new_nonce)
         # 5xx + nonce-burned 表示服务端已消费 nonce — 推一下下界再交给上层重试
         if err.headers.get("X-EMG-Nonce-Burned", "").lower() == "true":
             nonce_mod.bump_to(principal, nonce)
         raise
+
+
+def _parse_retry_after(header: Optional[str], default: float = 1.0, cap: float = 60.0) -> float:
+    """解析 `Retry-After` —— 既支持 delta-seconds（数字），也支持 HTTP-date。
+
+    异常输入回 default；任何上限超过 `cap` 秒强制截断，防止 misconfigured
+    服务端把客户端挂到下个世纪。一次重试就好，多了打回上层。
+    """
+    if not header:
+        return default
+    try:
+        secs = float(header.strip())
+        return min(max(secs, 0.0), cap)
+    except ValueError:
+        pass
+    try:
+        # HTTP-date format: "Wed, 21 Oct 2026 07:28:00 GMT"
+        from email.utils import parsedate_to_datetime
+        target = parsedate_to_datetime(header)
+        if target is None:
+            return default
+        delta = (target - datetime.now(timezone.utc)).total_seconds()
+        return min(max(delta, 0.0), cap)
+    except (TypeError, ValueError):
+        return default
 
 
 # --- 显示辅助 ---------------------------------------------------------------
