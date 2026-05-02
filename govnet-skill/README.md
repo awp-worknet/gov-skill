@@ -25,7 +25,7 @@ Optional environment variables:
 
 | Variable           | Default                              | Purpose                              |
 |--------------------|--------------------------------------|--------------------------------------|
-| `GOVNET_API_BASE`  | `https://api.gov.works/v1`           | REST base URL                        |
+| `GOVNET_API_BASE`  | `https://api.gov.works`              | REST base URL (do NOT include `/v1`) |
 | `GOVNET_WS_URL`    | `wss://api.gov.works/v1/ws`          | WebSocket URL                        |
 | `GOVNET_NONCE_DIR` | `~/.govnet/nonces/`                  | Per-principal nonce floor cache      |
 | `GOVNET_AUTH_DIR`  | `~/.govnet/`                         | Cached `auth-info.json`              |

@@ -25,7 +25,7 @@ from .sign import sign_emg_request, wallet_address
 
 
 # 默认 endpoint — 可通过环境变量覆盖。所有 URL 必须是 HTTPS / WSS。
-API_BASE = os.environ.get("GOVNET_API_BASE", "https://api.gov.works/v1").rstrip("/")
+API_BASE = os.environ.get("GOVNET_API_BASE", "https://api.gov.works").rstrip("/")
 WS_URL = os.environ.get("GOVNET_WS_URL", "wss://api.gov.works/v1/ws")
 
 # 网络请求默认超时（秒）。流式订阅在 ws.py 里另行设置。
