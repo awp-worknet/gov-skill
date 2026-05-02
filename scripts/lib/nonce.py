@@ -55,16 +55,27 @@ def _now_iso() -> str:
 
 
 def _atomic_write(path: Path, payload: dict) -> None:
-    """通过 `os.replace` 写入 — 同 mount point 下的 rename 是原子的。"""
+    """通过 `os.replace` 写入 — 同 mount point 下的 rename 是原子的。
+
+    任何异常路径（write/fsync/replace 失败）都清理临时文件，避免磁盘满
+    或 nonce 目录被 mount 错时堆 orphan tmp。
+    """
     tmp = path.with_suffix(path.suffix + f".tmp.{os.getpid()}.{time.time_ns()}")
     data = json.dumps(payload).encode("utf-8")
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     try:
-        os.write(fd, data)
-        os.fsync(fd)
-    finally:
-        os.close(fd)
-    os.replace(tmp, path)
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        try:
+            os.write(fd, data)
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except FileNotFoundError:
+            pass
+        raise
 
 
 @contextlib.contextmanager

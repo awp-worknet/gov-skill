@@ -78,6 +78,11 @@ class WSClient:
         self._closed = True
         if self._reader_task:
             self._reader_task.cancel()
+            # 等 reader 真正退出再关 socket，避免长 async 程序里留 unjoined task
+            try:
+                await self._reader_task
+            except (asyncio.CancelledError, Exception):
+                pass
         if self._ws:
             await self._ws.close()
 

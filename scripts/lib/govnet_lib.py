@@ -16,6 +16,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from datetime import datetime, timezone
 from decimal import Decimal, ROUND_HALF_EVEN
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
@@ -93,6 +94,35 @@ def _problem_to_error(status: int, raw: bytes, headers: Dict[str, str]) -> EmgEr
 # --- HTTP --------------------------------------------------------------------
 
 
+class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """拒绝任何 30x 重定向 —— 防签名 header 被代发到攻击者控制的目标。
+
+    威胁模型：urllib 默认的 HTTPRedirectHandler 会跟随 301/302/303/307/308，
+    并且**把全部 header 一起转发**（包括我们的 X-EMG-* 五元组签名头）。
+    如果生产域名被中间人或 misconfig DNS 指向 `attacker.example`，攻击者
+    返回一个看似无害的 302 就能拿到我们的合法签名，replay 到真服务器。
+
+    `_enforce_https` 只查初始 URL，不查 redirect target。装这个 handler
+    保证我们 **永不** 跟随重定向 —— 服务端真要换地址，应该走 DNS / load
+    balancer / 客户端配置 (`GOVNET_API_BASE`)，不应该靠 30x。
+    """
+    def http_error_301(self, req, fp, code, msg, headers):
+        raise EmgError(
+            "INSECURE_REDIRECT",
+            f"server returned {code} redirect to {headers.get('Location', '?')}; "
+            "skill refuses to forward signed headers across redirects",
+            status=code,
+        )
+    http_error_302 = http_error_301
+    http_error_303 = http_error_301
+    http_error_307 = http_error_301
+    http_error_308 = http_error_301
+
+
+# 用模块级 opener 替换默认 —— 影响 `_request` 里所有 urlopen 调用
+_OPENER = urllib.request.build_opener(_NoRedirectHandler())
+
+
 def _request(
     method: str,
     url: str,
@@ -101,13 +131,17 @@ def _request(
     body: Optional[bytes] = None,
     timeout: Optional[float] = None,
 ) -> Tuple[int, bytes, Dict[str, str]]:
-    """裸 HTTP 调用 — 不解析 JSON，只做错误码翻译。"""
+    """裸 HTTP 调用 — 不解析 JSON，只做错误码翻译。
+
+    用本模块的 `_OPENER`（禁用了 redirect）而不是 `urllib.request.urlopen`
+    全局 opener，避免 redirect 携带签名 header 泄露到第三方域名。
+    """
     _enforce_https(url)
     req = urllib.request.Request(url, data=body, method=method.upper())
     for k, v in (headers or {}).items():
         req.add_header(k, v)
     try:
-        with urllib.request.urlopen(req, timeout=timeout or HTTP_TIMEOUT) as resp:
+        with _OPENER.open(req, timeout=timeout or HTTP_TIMEOUT) as resp:
             data = resp.read()
             hdrs = {k: v for k, v in resp.headers.items()}
             return resp.status, data, hdrs
@@ -136,7 +170,9 @@ def fetch(method: str, path: str, *, params: Optional[Dict] = None, body: Option
     raw_body: Optional[bytes] = None
     headers: Dict[str, str] = {"Accept": "application/json", "User-Agent": "govnet-skill/0.1"}
     if body is not None:
-        raw_body = json.dumps(body).encode("utf-8")
+        # 紧凑 JSON 与 signed_request 一致 —— 让来日万一从 fetch 改走签名路径
+        # 时不会因为 separator 不同而 bodyHash 漂移
+        raw_body = json.dumps(body, separators=(",", ":")).encode("utf-8")
         headers["Content-Type"] = "application/json"
 
     status, data, _hdrs = _request(method, url, headers=headers, body=raw_body)
@@ -146,6 +182,69 @@ def fetch(method: str, path: str, *, params: Optional[Dict] = None, body: Option
         return json.loads(data.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError) as e:
         raise EmgError("MALFORMED_JSON", f"server returned non-JSON: {data[:200]!r}") from e
+
+
+# --- 自动翻页 ---------------------------------------------------------------
+
+
+def paginate_all(
+    fetch_page,
+    *,
+    initial_params: Optional[Dict] = None,
+    max_pages: int = 100,
+    data_key: str = "data",
+    pagination_key: str = "pagination",
+    cursor_key: str = "next_cursor",
+    has_more_key: str = "has_more",
+) -> Dict[str, Any]:
+    """跟着 cursor 翻完所有页，把所有 `data[]` 拼回一个数组。
+
+    `fetch_page(params: dict) -> dict` 是调用方提供的回调，应返回服务端的
+    分页响应（含 `data[]` 和 `pagination.{next_cursor, has_more}`）。本函数
+    不关心是 `fetch()` 还是 `signed_request()` 拉的，公开/私有列表都能复用。
+
+    停止条件优先级（OpenAPI `Pagination` schema 把 `has_more` 标 required，
+    `next_cursor` 是 nullable + 非 required，所以 `has_more` 才是权威信号）：
+        1. `has_more` 显式 false → 停（无视 cursor 是否为空）
+        2. 没有可用 cursor → 停（即便 has_more 不一致也无法前进）
+        3. 否则继续
+
+    `max_pages` 是防呆 —— 数据量异常大或服务端 cursor 出 bug 死循环时
+    强制截断；超过会在返回的 dict 里加 `truncated_at_max_pages: true` +
+    `next_cursor`，调用方/agent 自己判断要不要接力翻更多。
+
+    返回 `{data: [...合并...], pagination: {...最后一页的...}, page_count: N}`，
+    保留服务端原本响应的其它字段（除了 data 是合并的）。
+    """
+    params = dict(initial_params or {})
+    aggregated: list = []
+    last_resp: Dict[str, Any] = {}
+    last_cursor: Optional[str] = None
+    pages = 0
+    while pages < max_pages:
+        last_resp = fetch_page(params)
+        pages += 1
+        items = last_resp.get(data_key, []) or []
+        aggregated.extend(items)
+        pagination = last_resp.get(pagination_key) or {}
+        last_cursor = pagination.get(cursor_key)
+        has_more = pagination.get(has_more_key)
+        # has_more 显式 false → 服务端确定地告诉我们没了
+        if has_more is False:
+            break
+        # 没 cursor 可用 → 即便 has_more 是 None / true，我们也无法继续
+        if not last_cursor:
+            break
+        params = dict(params)
+        params["cursor"] = last_cursor
+    out: Dict[str, Any] = {data_key: aggregated, "page_count": pages}
+    # 截断时把接力 cursor 暴露给调用方
+    if pages == max_pages and last_cursor:
+        out["truncated_at_max_pages"] = True
+        out["next_cursor"] = last_cursor
+    if pagination_key in last_resp:
+        out[pagination_key] = last_resp[pagination_key]
+    return out
 
 
 # --- auth info 缓存 ----------------------------------------------------------
@@ -267,10 +366,40 @@ def signed_request(
             )
             new = nonce_mod.bump_to(principal, max(stored, nonce))
             return _attempt(new)
+        if err.status == 429:
+            # 服务端 rate-limit；honor Retry-After header（秒），上限 60s 防呆
+            wait = _parse_retry_after(err.headers.get("Retry-After"))
+            time.sleep(wait)
+            new_nonce = nonce_mod.next_nonce(principal)
+            return _attempt(new_nonce)
         # 5xx + nonce-burned 表示服务端已消费 nonce — 推一下下界再交给上层重试
         if err.headers.get("X-EMG-Nonce-Burned", "").lower() == "true":
             nonce_mod.bump_to(principal, nonce)
         raise
+
+
+def _parse_retry_after(header: Optional[str], default: float = 1.0, cap: float = 60.0) -> float:
+    """解析 `Retry-After` —— 既支持 delta-seconds（数字），也支持 HTTP-date。
+
+    异常输入回 default；任何上限超过 `cap` 秒强制截断，防止 misconfigured
+    服务端把客户端挂到下个世纪。一次重试就好，多了打回上层。
+    """
+    if not header:
+        return default
+    try:
+        secs = float(header.strip())
+        return min(max(secs, 0.0), cap)
+    except ValueError:
+        pass
+    try:
+        # HTTP-date format: "Wed, 21 Oct 2026 07:28:00 GMT" — `parsedate_to_datetime`
+        # 要么返回 datetime，要么 raise (TypeError/ValueError)；不会返回 None
+        from email.utils import parsedate_to_datetime
+        target = parsedate_to_datetime(header)
+        delta = (target - datetime.now(timezone.utc)).total_seconds()
+        return min(max(delta, 0.0), cap)
+    except (TypeError, ValueError):
+        return default
 
 
 # --- 显示辅助 ---------------------------------------------------------------

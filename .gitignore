@@ -20,3 +20,6 @@ Thumbs.db
 
 # Skill runtime state (per-user, never committed)
 .govnet/
+
+# skill-creator eval workspace — local optimization artifacts
+govnet-skill-workspace/

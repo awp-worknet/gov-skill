@@ -281,6 +281,46 @@ Notification field is `params.channel` (not `params.topic`).
 
 ---
 
+## Pagination (cursor-based)
+
+Every list endpoint returns a `Pagination` envelope alongside `data[]`:
+
+```json
+{
+  "data": [ … ],
+  "pagination": {
+    "next_cursor": "opaque-string-or-null",
+    "has_more": true,
+    "limit": 100
+  }
+}
+```
+
+OpenAPI (`02-openapi.yaml` lines 2313-2327) marks `has_more` and `limit`
+as **required**, and `next_cursor` as `nullable + non-required`. **`has_more`
+is the authoritative stop signal** — `next_cursor` may legally be omitted
+or null even when more pages exist (servers vary). Clients must dispatch on
+`has_more` first.
+
+The skill's `lib.govnet_lib.paginate_all(fetch_page, …)` helper implements
+this:
+
+1. `has_more === false` → stop unconditionally
+2. cursor is null/empty → stop (cannot advance regardless of `has_more`)
+3. otherwise → set `params["cursor"] = next_cursor`, fetch next page
+
+Default page cap is 100. When hit, output gains `truncated_at_max_pages: true`
+plus the surviving `next_cursor` so the agent can resume manually. `--all-pages`
+is opt-in on the listing scripts (`leaderboard`, `orders-list`, `epochs voters`,
+`epochs history`); without it scripts return one page + raw `pagination` field
+so the agent can parse `next_cursor` itself.
+
+For signed listings (`orders-list --all-pages`) each page consumes one
+nonce — pagination is N independent signed GETs, not a single request. Don't
+enable on million-row listings without `--max-pages`.
+
+---
+
 ## Error envelope (RFC 7807 problem+json)
 
 ```json

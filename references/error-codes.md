@@ -165,3 +165,19 @@ from REST):
   via REST + re-subscribe without `since_sequence`
 - `AUTH_SESSION_REQUIRED` — private channel on unauthenticated connection
 - `RATE_LIMIT_EXCEEDED` — per-connection subscribe-rate cap
+
+---
+
+## Client-emitted codes (NOT from the server)
+
+These are raised inside `scripts/lib/govnet_lib.py` before any wire
+contact, or in response to wire conditions the skill refuses to honor.
+The `EmgError.code` is set to one of these so callers' `except EmgError`
+branches can dispatch on them the same way as server codes.
+
+| Code                  | When                                                                          |
+|-----------------------|-------------------------------------------------------------------------------|
+| `INSECURE_TRANSPORT`  | URL scheme is `http://` or `ws://`. Skill refuses plaintext to keep `X-EMG-*` headers from leaking. Set `GOVNET_API_BASE` / `GOVNET_WS_URL` to an `https://` / `wss://` URL. |
+| `INSECURE_REDIRECT`   | Server returned 30x. Skill refuses to follow because `urllib` would forward the signed `X-EMG-*` headers to the redirect target — a replay vector. Production endpoints should change via DNS / load-balancer / config, never via 30x. The `EmgError.detail` includes the `Location:` header value for diagnostics. |
+| `NETWORK_ERROR`       | DNS resolution failed, connection refused, TLS handshake failure, etc. Wraps `urllib.error.URLError`. Retry semantics are the caller's call. |
+| `MALFORMED_JSON`      | Server returned non-JSON body on a 2xx response. Either misconfigured upstream or a partial read. Surface to the user — there's no safe automatic retry. |
