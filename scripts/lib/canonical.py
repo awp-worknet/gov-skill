@@ -131,18 +131,26 @@ def canonicalize_query(query: str) -> str:
 def rust_decimal_serialize(d: Decimal) -> bytes:
     """复刻 `rust_decimal::Decimal::serialize` 的 16 字节小端二进制 layout。
 
-    内存布局（每个 u32 都是 little-endian）：
-        bytes[0..4]   = lo   (mantissa 低 32 位)
-        bytes[4..8]   = mid  (mantissa 中 32 位)
-        bytes[8..12]  = hi   (mantissa 高 32 位)
-        bytes[12..16] = flags：bits 16..23 = scale (0..28)，bit 31 = sign
+    实际字节顺序（与 paupino/rust-decimal 1.x 的 `serialize()` 对齐，已用
+    真 Rust 程序在 cargo 1.94 上交叉验证）：
+        bytes[0..4]   = flags (u32 LE)：bits 16..23 = scale (0..28)，bit 31 = sign
+        bytes[4..8]   = lo    (mantissa 低 32 位)
+        bytes[8..12]  = mid   (mantissa 中 32 位)
+        bytes[12..16] = hi    (mantissa 高 32 位)
+
+    `Decimal("0.5").serialize()` 在 Rust 端给出 `00000100 05000000 …`
+    —— flags 在最前面，**不是** 最后。早期版本的实现把它写反了，votes
+    会被服务端 ecrecover 全部拒掉。
 
     rust_decimal 的 mantissa 是无符号 96-bit，scale 描述小数点左移位数。
     Python `Decimal.as_tuple()` 给出 `(sign, digits, exponent)`，把 digits
     拼成整数即得 mantissa；scale = -exponent（要在 [0, 28] 范围）。
 
-    与 ASCII 文本格式严格不同 —— 这是投票 voteHash / predictionHash 服务端
-    认证的字节级合约，**不可以** 用 `format(d, 'f').encode()` 替代。
+    特殊处理：负零 `-0` 在 rust_decimal 内部归一化为正零（mantissa==0 时
+    丢弃 sign bit），我们在编码时同样归一化，避免与服务端 hash 漂移。
+
+    与 ASCII 文本格式严格不同 —— 这是投票 voteHash / predictionHash 的
+    字节级合约，**不可以** 用 `format(d, 'f').encode()` 替代。
     """
     sign, digits, exponent = d.as_tuple()
     if exponent in ("F", "n", "N"):
@@ -161,9 +169,10 @@ def rust_decimal_serialize(d: Decimal) -> bytes:
     mid = (mantissa >> 32) & 0xFFFFFFFF
     hi = (mantissa >> 64) & 0xFFFFFFFF
     flags = (scale & 0xFF) << 16
-    if sign:
+    # rust_decimal 把 -0 归一化为 +0；mantissa==0 时 sign bit 必须置 0
+    if sign and mantissa != 0:
         flags |= 0x80000000
-    return struct.pack("<IIII", lo, mid, hi, flags)
+    return struct.pack("<IIII", flags, lo, mid, hi)
 
 
 def canonical_decimal_vector(vec: Sequence[Decimal]) -> bytes:

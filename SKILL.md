@@ -277,7 +277,7 @@ Load on demand:
 ## Layout
 
 ```
-govnet-skill/
+gov-skill/                          # repo root === skill root
 ├── SKILL.md
 ├── README.md
 ├── LICENSE
