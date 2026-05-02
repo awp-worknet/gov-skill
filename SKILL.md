@@ -2,27 +2,27 @@
 name: govnet
 version: 0.1.0
 description: >
-  EMG protocol (a.k.a. GovNet) — list and watch prediction markets,
-  place and cancel limit/market orders, cast private votes during the
-  voting window, manage chip-to-share split/merge positions, monitor
-  live order books and fills, and read settlement results.
+  EMG protocol (a.k.a. GovNet) — list/watch prediction markets,
+  place/cancel limit/market orders, cast private votes during the
+  Wed-Thu voting window, split chips into worknet shares (or merge),
+  watch live order books + fills.me/orders.me, read settlement
+  results.
 
   Use this skill whenever the user mentions: GovNet, gov.works, EMG,
-  prediction-market vote, worknet emission, "chips this epoch", "split
-  chips into shares", "buy aMINE / aGOV / aPRED" (worknet names),
-  voting Wednesday, epoch settlement, V_j, W_j, "Σ Pⱼ", "show me the
-  order book for aGOV", "what's trading", "cast my vote". Trigger
-  even if the user does not explicitly type the word "skill" — any of
-  the above phrases means this skill is the right tool.
+  emission market, worknet (aMINE/aGOV/aPRED/aKYA/aARDI/aTMR/aCOM),
+  "chips this epoch", "split into shares", voting Wednesday,
+  settlement Tuesday, V_j / W_j / Σ Pⱼ, AWP Power, "this week's
+  market", "trading closes", "market phase". Trigger even when the
+  user does not type "govnet" — any of these phrases (chips, worknet,
+  weekly emission, per-Principal voting) means this skill is the
+  right tool.
 
-  The skill composes with awp-wallet (signs every state-changing or
-  private-read request via EIP-712) and optionally with awp-skill
-  (when the user needs to top up a veAWP position to gain AWP Power
-  for the next epoch).
+  Composes with awp-wallet (every signed request goes through it)
+  and awp-skill (veAWP / AWP Power).
 
-  NOT for: generic Solidity/EVM operations, non-EMG DeFi protocols,
-  Uniswap / Aave / Lido, raw token transfers, NFT trading. Do NOT
-  trigger on bare "vote" / "trade" without GovNet/EMG context.
+  NOT for: Polymarket, Augur, Hyperliquid, Binance, Uniswap, Aave,
+  Lido, generic DAO proposals (Compound, Snapshot), veAWP staking
+  (awp-skill), raw token transfers, NFT trading.
 
 metadata:
   openclaw:
