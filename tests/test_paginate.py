@@ -158,3 +158,60 @@ def test_custom_keys():
     )
     assert result["items"] == [{"x": 1}]
     assert result["page_count"] == 1
+
+
+# --- F1: has_more 是权威停止信号 -------------------------------------------
+
+
+def test_has_more_false_stops_even_if_cursor_present():
+    """OpenAPI 规定 has_more 必填、next_cursor 可空 — has_more 是权威信号。
+    如果服务端发 has_more=false 但 cursor 还有值（边界条件），我们应该停。"""
+    pages = [
+        {
+            "data": [{"id": 1}],
+            "pagination": {"next_cursor": "should-not-follow", "has_more": False, "limit": 1},
+        },
+    ]
+    state = {"calls": 0}
+
+    def fetch(params):
+        state["calls"] += 1
+        return pages[0]
+
+    result = paginate_all(fetch, initial_params={})
+    assert state["calls"] == 1, "has_more=false should stop immediately"
+    assert result["data"] == [{"id": 1}]
+
+
+def test_has_more_true_but_no_cursor_stops_safely():
+    """has_more=true 但 next_cursor=null — 矛盾输入，无法前进，安全停。"""
+    page = {
+        "data": [{"id": 1}],
+        "pagination": {"next_cursor": None, "has_more": True, "limit": 1},
+    }
+    state = {"calls": 0}
+
+    def fetch(params):
+        state["calls"] += 1
+        return page
+
+    result = paginate_all(fetch, initial_params={})
+    assert state["calls"] == 1
+    assert result["data"] == [{"id": 1}]
+
+
+def test_has_more_omitted_falls_back_to_cursor():
+    """服务端不发 has_more 字段时，cursor 是否存在决定是否继续。"""
+    pages = [
+        {"data": [{"id": 1}], "pagination": {"next_cursor": "c1", "limit": 1}},
+        {"data": [{"id": 2}], "pagination": {"next_cursor": None, "limit": 1}},
+    ]
+    state = {"calls": 0}
+
+    def fetch(params):
+        idx = state["calls"]; state["calls"] += 1
+        return pages[idx]
+
+    result = paginate_all(fetch, initial_params={})
+    assert state["calls"] == 2
+    assert result["data"] == [{"id": 1}, {"id": 2}]
