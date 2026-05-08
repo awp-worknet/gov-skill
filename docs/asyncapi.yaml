@@ -1,0 +1,1115 @@
+asyncapi: 3.0.0
+info:
+  title: EMG WebSocket + JSON-RPC API
+  version: 1.0.0
+  description: |
+    Real-time WebSocket API for the EMG protocol using JSON-RPC 2.0.
+    
+    This transport carries two classes of operations:
+    1. **Subscriptions** — long-running streams for real-time data (order book deltas,
+       K-line updates, phase transitions, own fills).
+    2. **Batch RPC calls** — atomic multi-action requests (e.g., submit multiple orders
+       in one message with all-or-nothing semantics).
+    
+    All WebSocket-only methods and subscription channels are defined here.
+    RPC methods that have REST equivalents share identical request/response shapes —
+    see `openapi.yaml` for those payload schemas.
+    
+    **Authentication**: after connecting, client must send an authenticated
+    `auth.hello` message within 10 seconds using the EMG-SIG-V1 signature scheme
+    (see openapi.yaml → securitySchemes → signatureV1). Unauthenticated connections
+    can subscribe only to public channels.
+
+servers:
+  production:
+    host: api.emg.awp.network
+    protocol: wss
+    pathname: /v1/ws
+  local:
+    host: localhost:8080
+    protocol: ws
+    pathname: /v1/ws
+
+channels:
+  rpc:
+    address: /
+    messages:
+      AuthHelloRequest:
+        $ref: '#/components/messages/AuthHelloRequest'
+      AuthHelloResponse:
+        $ref: '#/components/messages/AuthHelloResponse'
+      SubscribeRequest:
+        $ref: '#/components/messages/SubscribeRequest'
+      SubscribeResponse:
+        $ref: '#/components/messages/SubscribeResponse'
+      UnsubscribeRequest:
+        $ref: '#/components/messages/UnsubscribeRequest'
+      OrderSubmitRequest:
+        $ref: '#/components/messages/OrderSubmitRequest'
+      OrderSubmitResponse:
+        $ref: '#/components/messages/OrderSubmitResponse'
+      OrderCancelRequest:
+        $ref: '#/components/messages/OrderCancelRequest'
+      OrderCancelResponse:
+        $ref: '#/components/messages/OrderCancelResponse'
+      PositionSplitRequest:
+        $ref: '#/components/messages/PositionSplitRequest'
+      PositionMergeRequest:
+        $ref: '#/components/messages/PositionMergeRequest'
+      VoteSubmitRequest:
+        $ref: '#/components/messages/VoteSubmitRequest'
+      BatchRequest:
+        $ref: '#/components/messages/BatchRequest'
+      BatchResponse:
+        $ref: '#/components/messages/BatchResponse'
+      ErrorResponse:
+        $ref: '#/components/messages/ErrorResponse'
+      Ping:
+        $ref: '#/components/messages/Ping'
+      Pong:
+        $ref: '#/components/messages/Pong'
+
+  notifications_book:
+    address: /
+    messages:
+      BookUpdate:
+        $ref: '#/components/messages/BookUpdate'
+      BookSnapshot:
+        $ref: '#/components/messages/BookSnapshot'
+
+  notifications_klines:
+    address: /
+    messages:
+      KlineUpdate:
+        $ref: '#/components/messages/KlineUpdate'
+
+  notifications_fills:
+    address: /
+    messages:
+      FillNotification:
+        $ref: '#/components/messages/FillNotification'
+
+  notifications_orders:
+    address: /
+    messages:
+      OrderUpdate:
+        $ref: '#/components/messages/OrderUpdate'
+
+  notifications_phase:
+    address: /
+    messages:
+      PhaseTransition:
+        $ref: '#/components/messages/PhaseTransition'
+
+  notifications_reports:
+    address: /
+    messages:
+      NewReport:
+        $ref: '#/components/messages/NewReport'
+
+  notifications_comments:
+    address: /
+    messages:
+      NewComment:
+        $ref: '#/components/messages/NewComment'
+      CommentBridgeScoreUpdate:
+        $ref: '#/components/messages/CommentBridgeScoreUpdate'
+
+operations:
+  sendHello:
+    action: send
+    channel:
+      $ref: '#/channels/rpc'
+    messages:
+      - $ref: '#/channels/rpc/messages/AuthHelloRequest'
+    reply:
+      channel:
+        $ref: '#/channels/rpc'
+      messages:
+        - $ref: '#/channels/rpc/messages/AuthHelloResponse'
+  
+  sendSubscribe:
+    action: send
+    channel:
+      $ref: '#/channels/rpc'
+    messages:
+      - $ref: '#/channels/rpc/messages/SubscribeRequest'
+    reply:
+      channel:
+        $ref: '#/channels/rpc'
+      messages:
+        - $ref: '#/channels/rpc/messages/SubscribeResponse'
+  
+  sendOrderSubmit:
+    action: send
+    channel:
+      $ref: '#/channels/rpc'
+    messages:
+      - $ref: '#/channels/rpc/messages/OrderSubmitRequest'
+    reply:
+      channel:
+        $ref: '#/channels/rpc'
+      messages:
+        - $ref: '#/channels/rpc/messages/OrderSubmitResponse'
+  
+  sendBatch:
+    action: send
+    channel:
+      $ref: '#/channels/rpc'
+    messages:
+      - $ref: '#/channels/rpc/messages/BatchRequest'
+    reply:
+      channel:
+        $ref: '#/channels/rpc'
+      messages:
+        - $ref: '#/channels/rpc/messages/BatchResponse'
+  
+  receiveBookUpdates:
+    action: receive
+    channel:
+      $ref: '#/channels/notifications_book'
+    messages:
+      - $ref: '#/channels/notifications_book/messages/BookUpdate'
+      - $ref: '#/channels/notifications_book/messages/BookSnapshot'
+  
+  receiveKlineUpdates:
+    action: receive
+    channel:
+      $ref: '#/channels/notifications_klines'
+    messages:
+      - $ref: '#/channels/notifications_klines/messages/KlineUpdate'
+  
+  receiveFillNotifications:
+    action: receive
+    channel:
+      $ref: '#/channels/notifications_fills'
+    messages:
+      - $ref: '#/channels/notifications_fills/messages/FillNotification'
+  
+  receiveOrderUpdates:
+    action: receive
+    channel:
+      $ref: '#/channels/notifications_orders'
+    messages:
+      - $ref: '#/channels/notifications_orders/messages/OrderUpdate'
+  
+  receivePhaseTransitions:
+    action: receive
+    channel:
+      $ref: '#/channels/notifications_phase'
+    messages:
+      - $ref: '#/channels/notifications_phase/messages/PhaseTransition'
+
+components:
+  messages:
+    # ===================================================================
+    # JSON-RPC request/response envelopes
+    # ===================================================================
+    AuthHelloRequest:
+      summary: Authenticate the WebSocket session
+      description: |
+        Must be sent within 10 seconds of connection. After successful
+        handshake, the connection is bound to this Staker for all subsequent
+        authenticated operations.
+        
+        The signature uses EMG-SIG-V1 with method `WS_HELLO` and path `/v1/ws`.
+      payload:
+        $ref: '#/components/schemas/JsonRpcAuthHello'
+    
+    AuthHelloResponse:
+      payload:
+        $ref: '#/components/schemas/JsonRpcAuthHelloResponse'
+    
+    SubscribeRequest:
+      summary: Subscribe to one or more channels
+      description: |
+        Public channels (book, klines, phase, reports, comments) work on
+        unauthenticated connections. Private channels (fills.me, orders.me)
+        require prior `auth.hello`.
+      payload:
+        $ref: '#/components/schemas/JsonRpcSubscribe'
+    
+    SubscribeResponse:
+      payload:
+        $ref: '#/components/schemas/JsonRpcSubscribeResponse'
+    
+    UnsubscribeRequest:
+      payload:
+        $ref: '#/components/schemas/JsonRpcUnsubscribe'
+    
+    OrderSubmitRequest:
+      summary: Submit an order (WS equivalent of REST POST /v1/orders)
+      payload:
+        $ref: '#/components/schemas/JsonRpcOrderSubmit'
+    
+    OrderSubmitResponse:
+      payload:
+        $ref: '#/components/schemas/JsonRpcOrderResult'
+    
+    OrderCancelRequest:
+      payload:
+        $ref: '#/components/schemas/JsonRpcOrderCancel'
+    
+    OrderCancelResponse:
+      payload:
+        $ref: '#/components/schemas/JsonRpcOrderCancelResult'
+    
+    PositionSplitRequest:
+      payload:
+        $ref: '#/components/schemas/JsonRpcPositionSplit'
+    
+    PositionMergeRequest:
+      payload:
+        $ref: '#/components/schemas/JsonRpcPositionMerge'
+    
+    VoteSubmitRequest:
+      payload:
+        $ref: '#/components/schemas/JsonRpcVoteSubmit'
+    
+    BatchRequest:
+      summary: Atomic or independent batch of RPC calls
+      description: |
+        JSON-RPC 2.0 standard batch request. Server processes the array in
+        order and returns results in matching order (by id).
+        
+        For atomic semantics (all-or-nothing), include a special leading item:
+        ```json
+        [
+          {"jsonrpc": "2.0", "method": "batch.config", "params": {"atomic": true}, "id": "cfg"},
+          ...actual operations...
+        ]
+        ```
+        If any non-config item fails, the server rolls back all prior items
+        in the same batch.
+      payload:
+        type: array
+        items:
+          oneOf:
+            - $ref: '#/components/schemas/JsonRpcOrderSubmit'
+            - $ref: '#/components/schemas/JsonRpcOrderCancel'
+            - $ref: '#/components/schemas/JsonRpcPositionSplit'
+            - $ref: '#/components/schemas/JsonRpcPositionMerge'
+            - $ref: '#/components/schemas/JsonRpcBatchConfig'
+    
+    BatchResponse:
+      payload:
+        type: array
+        items:
+          oneOf:
+            - $ref: '#/components/schemas/JsonRpcSuccessResponse'
+            - $ref: '#/components/schemas/JsonRpcErrorResponse'
+    
+    ErrorResponse:
+      payload:
+        $ref: '#/components/schemas/JsonRpcErrorResponse'
+    
+    Ping:
+      summary: Heartbeat from client
+      description: Server responds with Pong. Connections idle >60s are dropped.
+      payload:
+        $ref: '#/components/schemas/JsonRpcPing'
+    
+    Pong:
+      payload:
+        $ref: '#/components/schemas/JsonRpcPong'
+    
+    # ===================================================================
+    # Server-sent notifications (no id field per JSON-RPC 2.0 spec)
+    # ===================================================================
+    BookSnapshot:
+      summary: Full order book state (sent on subscribe)
+      payload:
+        $ref: '#/components/schemas/BookSnapshotNotif'
+    
+    BookUpdate:
+      summary: Incremental order book delta
+      payload:
+        $ref: '#/components/schemas/BookUpdateNotif'
+    
+    KlineUpdate:
+      summary: New K-line candle closed
+      payload:
+        $ref: '#/components/schemas/KlineUpdateNotif'
+    
+    FillNotification:
+      summary: Fill involving the authenticated Staker
+      payload:
+        $ref: '#/components/schemas/FillNotif'
+    
+    OrderUpdate:
+      summary: Status change on authed Staker's own order
+      payload:
+        $ref: '#/components/schemas/OrderUpdateNotif'
+    
+    PhaseTransition:
+      summary: Epoch phase change
+      payload:
+        $ref: '#/components/schemas/PhaseTransitionNotif'
+    
+    NewReport:
+      summary: A new weekly report published
+      payload:
+        $ref: '#/components/schemas/NewReportNotif'
+    
+    NewComment:
+      summary: A new comment posted
+      payload:
+        $ref: '#/components/schemas/NewCommentNotif'
+    
+    CommentBridgeScoreUpdate:
+      summary: Bridge score updated for a comment (end-of-epoch)
+      payload:
+        $ref: '#/components/schemas/CommentBridgeScoreNotif'
+
+  schemas:
+    # ===================================================================
+    # JSON-RPC envelope primitives
+    # ===================================================================
+    JsonRpcBase:
+      type: object
+      properties:
+        jsonrpc:
+          type: string
+          const: "2.0"
+        id:
+          oneOf:
+            - type: string
+            - type: integer
+      required: [jsonrpc]
+    
+    # --- auth.hello -----------------------------------------------------
+    JsonRpcAuthHello:
+      allOf:
+        - $ref: '#/components/schemas/JsonRpcBase'
+        - type: object
+          required: [method, params, id]
+          properties:
+            method:
+              const: auth.hello
+            params:
+              type: object
+              required: [principal, timestamp, nonce, signature]
+              description: |
+                EIP-712 signature over an EMGRequest typed-data struct with
+                `method="WS_HELLO"` and `path="/v1/ws"`. Same scheme as REST
+                auth (see openapi.yaml → signatureV1). The `actor` field is
+                optional — if omitted, defaults to `principal` (self-operation).
+                If the signing party is a Manager, include both `principal`
+                (the Staker) and `actor` (the Manager signing).
+              properties:
+                principal:
+                  type: string
+                  description: 0x-prefixed hex Staker address (20 bytes)
+                  example: "0x742d35cc6634c0532925a3b844bc9e7595f0beb7"
+                actor:
+                  type: string
+                  description: 0x-prefixed hex signer address. Optional; defaults to principal.
+                  example: "0xabc123..."
+                timestamp:
+                  type: integer
+                  format: int64
+                  description: Unix seconds
+                nonce:
+                  type: integer
+                  format: int64
+                  description: Monotonic counter per (principal, chainId, verifyingContract)
+                signature:
+                  type: string
+                  description: 0x-prefixed hex ECDSA signature (65 bytes, r||s||v)
+    
+    JsonRpcAuthHelloResponse:
+      allOf:
+        - $ref: '#/components/schemas/JsonRpcBase'
+        - type: object
+          required: [result, id]
+          properties:
+            result:
+              type: object
+              required: [authenticated, principal, session_expires_at, current_sequences]
+              properties:
+                authenticated:
+                  type: boolean
+                principal:
+                  type: string
+                  format: eth-address
+                session_expires_at:
+                  type: string
+                  format: date-time
+                current_sequences:
+                  type: object
+                  description: |
+                    **R8-Z** — Per-channel sequence-number snapshot at the
+                    moment of handshake. Reconnecting clients use this map
+                    to compute the `since_sequence` to send with `subscribe`
+                    without an extra round-trip: persist the last `seq`
+                    observed per channel across reconnects, then on the
+                    next `auth.hello` compare it against this map's value
+                    for the same channel-id and pass that value (or the
+                    persisted one, whichever is lower) as `since_sequence`.
+
+                    Keys are channel-ids; values are the last sequence
+                    number emitted on that channel (high-water mark). Only
+                    channels that exist in the broker at handshake time
+                    appear; unknown channels resume from 0. Server emits
+                    keys in sorted order — clients that hash the response
+                    for cache validation can rely on that.
+                  additionalProperties:
+                    type: integer
+                    format: uint64
+                  example:
+                    book.1.1: 1234567
+                    klines.1.1.1m: 89012
+                    phase: 42
+    
+    # --- subscribe / unsubscribe ---------------------------------------
+    JsonRpcSubscribe:
+      allOf:
+        - $ref: '#/components/schemas/JsonRpcBase'
+        - type: object
+          required: [method, params, id]
+          properties:
+            method:
+              const: subscribe
+            params:
+              type: object
+              required: [channels]
+              properties:
+                channels:
+                  type: array
+                  items:
+                    type: string
+                  description: |
+                    Channel IDs. Supported:
+                    - `book.{market_id}.{worknet_id}` (public)
+                    - `klines.{market_id}.{worknet_id}.{interval}` (public)
+                    - `fills.me` (auth required)
+                    - `orders.me` (auth required)
+                    - `account` (auth required; own PrincipalCurrentState changes)
+                    - `phase` (public; all-markets multiplex)
+                    - `phase.{market_id}` (public; per-market scope —
+                      receives only `PhaseChanged` events whose
+                      `market_id` matches. Coexists with the global
+                      `phase` channel; subscribing to both will
+                      duplicate every matching market's transition,
+                      which is rarely desired)
+                    - `reports` (public)
+                    - `comments` (public)
+                  example: ["book.1.1", "klines.1.1.1m", "phase.42"]
+                since_sequence:
+                  type: integer
+                  format: uint64
+                  description: |
+                    **Resumption** (ADR-014 §7). If provided, the server replays
+                    events with `sequence > since_sequence` from its WAL before
+                    streaming live events. Resumption window defaults to the
+                    current epoch's WAL retention (see ADR-012).
+
+                    If `since_sequence` is older than what the server retains,
+                    the response carries `failed` entries with
+                    `error.code = "SEQUENCE_TOO_OLD"` and
+                    `error.details.earliest_available`. The client should then
+                    cold re-fetch state via REST and re-subscribe without
+                    `since_sequence`.
+                  example: 1234567
+
+    JsonRpcSubscribeResponse:
+      allOf:
+        - $ref: '#/components/schemas/JsonRpcBase'
+        - type: object
+          required: [result, id]
+          properties:
+            result:
+              type: object
+              properties:
+                subscribed:
+                  type: array
+                  items:
+                    type: string
+                failed:
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      channel:
+                        type: string
+                      error:
+                        type: object
+                        required: [code, message]
+                        properties:
+                          code:
+                            type: string
+                            description: |
+                              Machine-readable error code. Per-channel codes
+                              (WS-specific, distinct from the §9.5.1 REST
+                              codebook because they're per-channel within
+                              one whole-call response):
+                              - `CHANNEL_NOT_FOUND` — channel string didn't
+                                match any of the 8 supported patterns.
+                              - `CHANNEL_INVALID_FIELD` — pattern matched
+                                but a field is malformed (e.g. `book.abc`
+                                — non-integer `worknet_id`; or
+                                `klines.1.15m` — unsupported interval).
+                              - `SEQUENCE_TOO_OLD` — resumption outside
+                                the WAL retention window.
+                              - `AUTH_SESSION_REQUIRED` — private channel
+                                requested on an unauthenticated connection.
+                              - `RATE_LIMIT_EXCEEDED` — per-connection
+                                subscribe-rate cap.
+                          message:
+                            type: string
+                          details:
+                            type: object
+                            additionalProperties: true
+                channel_sequences:
+                  type: object
+                  description: |
+                    **Round 6** — Per-channel high-water marks at the
+                    moment of subscribe. Returning a single
+                    cross-channel `max()` was wrong: a client persisting
+                    that single value and resuming any one channel with
+                    `since_sequence = max` would either skip events on
+                    the lower-seq channels or hit `SEQUENCE_TOO_OLD` on
+                    the higher-seq one. Each channel has its own
+                    monotonic counter, so the resume contract is
+                    per-channel.
+
+                    Keys are channel-ids (those listed in `subscribed[]`);
+                    values are the last sequence number emitted on that
+                    channel. Clients persist the map across reconnects
+                    and pass each channel's value as `since_sequence` on
+                    the next subscribe.
+                  additionalProperties:
+                    type: integer
+                    format: uint64
+                  example:
+                    book.1.7: 1234567
+                    fills.me: 89012
+    
+    JsonRpcUnsubscribe:
+      allOf:
+        - $ref: '#/components/schemas/JsonRpcBase'
+        - type: object
+          required: [method, params, id]
+          properties:
+            method:
+              const: unsubscribe
+            params:
+              type: object
+              required: [channels]
+              properties:
+                channels:
+                  type: array
+                  items:
+                    type: string
+    
+    # --- orders --------------------------------------------------------
+    JsonRpcOrderSubmit:
+      allOf:
+        - $ref: '#/components/schemas/JsonRpcBase'
+        - type: object
+          required: [method, params, id]
+          properties:
+            method:
+              const: orders.submit
+            params:
+              type: object
+              required: [worknet_id, side, quantity]
+              description: |
+                Same field semantics as the REST CreateOrderRequest
+                (see openapi.yaml). Mirrored here for WebSocket clients.
+              properties:
+                worknet_id:
+                  type: integer
+                side:
+                  type: string
+                  enum: [buy, sell]
+                quantity:
+                  type: string
+                  format: decimal
+                  description: Multiple of 0.00000001 (quantity step)
+                limit_price:
+                  type: string
+                  format: decimal
+                  description: Multiple of 0.0001 (tick size); null = market
+                kind:
+                  type: string
+                  enum: [limit, market]
+                  default: limit
+                time_in_force:
+                  type: string
+                  enum: [gtc, ioc, fok, gtt]
+                  default: gtc
+                expires_at:
+                  type: integer
+                  format: int64
+                  description: Unix seconds; required for time_in_force=gtt
+                post_only:
+                  type: boolean
+                  default: false
+                reduce_only:
+                  type: boolean
+                  default: false
+                visible_quantity:
+                  type: string
+                  format: decimal
+                  description: For iceberg orders; must be < quantity
+                stp_mode:
+                  type: string
+                  enum: [cancel_maker, cancel_taker, cancel_both, decrement_taker]
+                  default: cancel_both
+                allow_synthesis:
+                  type: boolean
+                  default: true
+                client_order_id:
+                  type: string
+                idempotency_key:
+                  type: string
+                  format: uuid
+                  description: Optional; if present, enables safe retry (see REST §9.4)
+    
+    JsonRpcOrderResult:
+      allOf:
+        - $ref: '#/components/schemas/JsonRpcBase'
+        - type: object
+          required: [result, id]
+          properties:
+            result:
+              type: object
+              properties:
+                order_id:
+                  type: string
+                  format: uuid
+                status:
+                  type: string
+                fills:
+                  type: array
+                  items:
+                    type: object
+    
+    JsonRpcOrderCancel:
+      allOf:
+        - $ref: '#/components/schemas/JsonRpcBase'
+        - type: object
+          required: [method, params, id]
+          properties:
+            method:
+              const: orders.cancel
+            params:
+              type: object
+              required: [order_id]
+              properties:
+                order_id:
+                  type: string
+                  format: uuid
+    
+    JsonRpcOrderCancelResult:
+      allOf:
+        - $ref: '#/components/schemas/JsonRpcBase'
+        - type: object
+          required: [result, id]
+          properties:
+            result:
+              type: object
+              properties:
+                order_id:
+                  type: string
+                cancelled:
+                  type: boolean
+    
+    # --- positions -----------------------------------------------------
+    JsonRpcPositionSplit:
+      allOf:
+        - $ref: '#/components/schemas/JsonRpcBase'
+        - type: object
+          required: [method, params, id]
+          properties:
+            method:
+              const: positions.split
+            params:
+              type: object
+              required: [quantity]
+              properties:
+                quantity:
+                  type: string
+                  format: decimal
+    
+    JsonRpcPositionMerge:
+      allOf:
+        - $ref: '#/components/schemas/JsonRpcBase'
+        - type: object
+          required: [method, params, id]
+          properties:
+            method:
+              const: positions.merge
+            params:
+              type: object
+              required: [quantity]
+              properties:
+                quantity:
+                  type: string
+                  format: decimal
+    
+    # --- votes ---------------------------------------------------------
+    JsonRpcVoteSubmit:
+      allOf:
+        - $ref: '#/components/schemas/JsonRpcBase'
+        - type: object
+          required: [method, params, id]
+          properties:
+            method:
+              const: votes.submit
+            params:
+              type: object
+              required: [market_id, vote, prediction, nonce, signature]
+              properties:
+                market_id:
+                  type: integer
+                vote:
+                  type: array
+                  items:
+                    type: string
+                    format: decimal
+                prediction:
+                  type: array
+                  items:
+                    type: string
+                    format: decimal
+                nonce:
+                  type: integer
+                  format: int64
+                  description: Vote-level nonce (NOT the EMG-SIG-V1 nonce)
+                signature:
+                  type: string
+                  description: |
+                    0x-prefixed hex, 65 bytes. secp256k1 ECDSA signature over
+                    the EIP-712 digest of the EMGVote typed-data struct. See
+                    openapi.yaml → SignedVoteRequest.signature for the full
+                    struct definition.
+    
+    # --- batch config --------------------------------------------------
+    JsonRpcBatchConfig:
+      allOf:
+        - $ref: '#/components/schemas/JsonRpcBase'
+        - type: object
+          required: [method, params, id]
+          properties:
+            method:
+              const: batch.config
+            params:
+              type: object
+              properties:
+                atomic:
+                  type: boolean
+                  description: |
+                    If true, any failed item in the batch rolls back all prior
+                    items. If false (default), items execute independently.
+                  default: false
+    
+    # --- generic success / error ---------------------------------------
+    JsonRpcSuccessResponse:
+      allOf:
+        - $ref: '#/components/schemas/JsonRpcBase'
+        - type: object
+          required: [result, id]
+          properties:
+            result: {}
+    
+    JsonRpcErrorResponse:
+      allOf:
+        - $ref: '#/components/schemas/JsonRpcBase'
+        - type: object
+          required: [error, id]
+          properties:
+            error:
+              type: object
+              required: [code, message]
+              properties:
+                code:
+                  type: integer
+                  description: |
+                    Standard JSON-RPC codes (-32xxx) for protocol-level errors;
+                    -40xxx for EMG domain errors. See `spec/07-api.md` §9.5.
+                  example: -40001
+                message:
+                  type: string
+                data:
+                  type: object
+                  properties:
+                    emg_code:
+                      type: string
+                      description: Stable EMG error code (e.g., INSUFFICIENT_BALANCE)
+                    details:
+                      type: object
+                    request_id:
+                      type: string
+                    timestamp:
+                      type: string
+                      format: date-time
+    
+    # --- ping/pong -----------------------------------------------------
+    JsonRpcPing:
+      allOf:
+        - $ref: '#/components/schemas/JsonRpcBase'
+        - type: object
+          required: [method, id]
+          properties:
+            method:
+              const: ping
+    
+    JsonRpcPong:
+      allOf:
+        - $ref: '#/components/schemas/JsonRpcBase'
+        - type: object
+          required: [result, id]
+          properties:
+            result:
+              type: object
+              properties:
+                server_time:
+                  type: string
+                  format: date-time
+    
+    # ===================================================================
+    # Notification payloads (no `id`, method is the event name)
+    # ===================================================================
+    BookSnapshotNotif:
+      type: object
+      required: [jsonrpc, method, params]
+      properties:
+        jsonrpc:
+          const: "2.0"
+        method:
+          const: book.snapshot
+        params:
+          type: object
+          properties:
+            channel:
+              type: string
+            worknet_id:
+              type: integer
+            timestamp:
+              type: string
+              format: date-time
+            sequence:
+              type: integer
+            bids:
+              type: array
+              items:
+                type: object
+                properties:
+                  price:
+                    type: string
+                  quantity:
+                    type: string
+            asks:
+              type: array
+              items:
+                type: object
+                properties:
+                  price:
+                    type: string
+                  quantity:
+                    type: string
+    
+    BookUpdateNotif:
+      type: object
+      required: [jsonrpc, method, params]
+      properties:
+        jsonrpc:
+          const: "2.0"
+        method:
+          const: book.update
+        params:
+          type: object
+          properties:
+            channel:
+              type: string
+            worknet_id:
+              type: integer
+            timestamp:
+              type: string
+              format: date-time
+            sequence:
+              type: integer
+              description: Monotonically increasing per-channel sequence number
+            previous_sequence:
+              type: integer
+              description: |
+                The sequence that this update comes after. If it does not match
+                the last sequence the client received, the client should
+                resubscribe to get a fresh snapshot.
+            changes:
+              type: array
+              items:
+                type: object
+                properties:
+                  side:
+                    type: string
+                    enum: [bid, ask]
+                  price:
+                    type: string
+                  new_quantity:
+                    type: string
+                    description: Absolute new quantity at this level. 0 = level removed.
+    
+    KlineUpdateNotif:
+      type: object
+      properties:
+        jsonrpc:
+          const: "2.0"
+        method:
+          const: klines.update
+        params:
+          type: object
+          properties:
+            channel:
+              type: string
+            sequence:
+              type: integer
+              format: uint64
+              description: Global monotonic sequence; supports `since_sequence` resumption (ADR-014 §7)
+            worknet_id:
+              type: integer
+            interval:
+              type: string
+              # Canonical KlineInterval set; matches openapi.yaml,
+              # schema.graphql (KlineInterval enum), and the WS
+              # channel parser in emg-api-ws/src/channels.rs.
+              # Phase 7b Turn 3 added the `1d` continuous-aggregate.
+              enum: ['1m', '5m', '1h', '4h', '1d']
+            candle:
+              type: object
+              properties:
+                timestamp:
+                  type: string
+                  format: date-time
+                open: { type: string }
+                high: { type: string }
+                low:  { type: string }
+                close: { type: string }
+                volume: { type: string }
+                trade_count: { type: integer }
+    
+    FillNotif:
+      type: object
+      properties:
+        jsonrpc:
+          const: "2.0"
+        method:
+          const: fills.update
+        params:
+          type: object
+          properties:
+            channel:
+              type: string
+            sequence:
+              type: integer
+              format: uint64
+              description: Global monotonic sequence; supports `since_sequence` resumption (ADR-014 §7)
+            fill_id: { type: string, format: uuid }
+            order_id: { type: string, format: uuid }
+            worknet_id: { type: integer }
+            side: { type: string, enum: [buy, sell] }
+            price: { type: string }
+            quantity: { type: string }
+            filled_at: { type: string, format: date-time }
+            role: { type: string, enum: [maker, taker] }
+    
+    OrderUpdateNotif:
+      type: object
+      properties:
+        jsonrpc:
+          const: "2.0"
+        method:
+          const: orders.update
+        params:
+          type: object
+          properties:
+            channel:
+              type: string
+            sequence:
+              type: integer
+              format: uint64
+              description: Global monotonic sequence; supports `since_sequence` resumption (ADR-014 §7)
+            order_id: { type: string, format: uuid }
+            status:
+              type: string
+              enum: [active, partially_filled, filled, cancelled, expired, rejected]
+            filled_quantity: { type: string }
+            remaining_quantity: { type: string }
+            avg_fill_price: { type: string, nullable: true }
+            updated_at: { type: string, format: date-time }
+    
+    PhaseTransitionNotif:
+      type: object
+      properties:
+        jsonrpc:
+          const: "2.0"
+        method:
+          const: phase.changed
+        params:
+          type: object
+          properties:
+            sequence:
+              type: integer
+              format: uint64
+              description: Global monotonic sequence; supports `since_sequence` resumption (ADR-014 §7)
+            market_id: { type: integer }
+            previous_phase:
+              type: string
+              # Phase 2A audit fix: aligned with REST `MarketStatus` —
+              # 5 variants matching the per-market FSM. Legacy
+              # `settlement` / `weekly_report` are no longer emitted;
+              # see `dev_docs/schema.graphql` EpochPhase for the
+              # GraphQL counterpart with deprecated WEEKLY_REPORT.
+              enum: [pending, voting_and_trading, trading_only, settling, completed]
+            current_phase:
+              type: string
+              enum: [pending, voting_and_trading, trading_only, settling, completed]
+            transitioned_at: { type: string, format: date-time }
+            next_transition_at: { type: string, format: date-time }
+    
+    NewReportNotif:
+      type: object
+      properties:
+        jsonrpc:
+          const: "2.0"
+        method:
+          const: reports.new
+        params:
+          type: object
+          properties:
+            report_id: { type: string, format: uuid }
+            market_id: { type: integer }
+            worknet_id: { type: integer }
+            submitted_at: { type: string, format: date-time }
+    
+    NewCommentNotif:
+      type: object
+      properties:
+        jsonrpc:
+          const: "2.0"
+        method:
+          const: comments.new
+        params:
+          type: object
+          properties:
+            comment_id: { type: string, format: uuid }
+            author_id: { type: string }
+            worknet_id: { type: integer, nullable: true }
+            market_id: { type: integer }
+            created_at: { type: string, format: date-time }
+    
+    CommentBridgeScoreNotif:
+      type: object
+      properties:
+        jsonrpc:
+          const: "2.0"
+        method:
+          const: comments.bridge_score_updated
+        params:
+          type: object
+          properties:
+            comment_id: { type: string, format: uuid }
+            bridge_score: { type: string, format: decimal }
+            market_id: { type: integer }

@@ -1,0 +1,2788 @@
+openapi: 3.0.3
+info:
+  title: EMG (Epistemic Market Gauge) API
+  description: |
+    REST API for the Governance WorkNet of the AWP ecosystem.
+
+    All state-changing endpoints require signed requests. See `/v1/auth/info` for signing format.
+
+    WebSocket API is documented separately in `asyncapi.yaml`.
+
+    ---
+
+    ## Conventions (ADR-014)
+
+    **Writes are async.** `POST` / `DELETE` endpoints return `202 Accepted` after
+    the matcher has durably logged the request to its WAL (ADR-012). Subsequent
+    state changes (fills, state updates) arrive via the WebSocket real-time path —
+    see `asyncapi.yaml`. Clients needing to track fill progression should subscribe
+    to `fills.me` / `account` instead of polling REST.
+
+    **Errors use `application/problem+json`** (RFC 7807). Every 4xx response
+    carries a `type` URL (stable), a `code` (ADR-006 codebook), and instance-specific
+    detail. Clients dispatch on `code` or `type`, not status code alone.
+
+    **Pagination is cursor-based.** List endpoints return `{ data, pagination }`
+    where `pagination.next_cursor` is opaque — clients pass it back unmodified.
+    Offsets are not supported (unsafe under concurrent inserts).
+
+    **Idempotency** via `X-Idempotency-Key` header (Stripe-style). Key must be
+    unique per request intent; re-use with a different body returns `422`.
+
+    **API evolvability.** `/v1/` is forward-compatible only: new optional request
+    fields, new response fields (clients ignore unknowns), new endpoints. Never
+    removes or renames. Breaking changes require `/v2/` with deprecation notice.
+
+    ---
+
+    ## Standard response headers
+
+    Every response includes:
+
+    | Header | Purpose |
+    |---|---|
+    | `X-API-Version` | Server version (e.g., `1.3.0`) for feature detection |
+    | `X-Request-Id` | Correlation ID for logs / support |
+    | `X-Read-Tier` | `1` / `2` / `3` per ADR-013 read-path tier |
+    | `X-Cache-Status` | `hit` / `miss` / `miss-fallback` (tier-2 only) |
+    | `X-State-Timestamp` | ISO-8601 as-of moment of returned data |
+    | `X-Consistency` | `eventual` / `strong` |
+    | `X-RateLimit-Limit` | Requests allowed in current window |
+    | `X-RateLimit-Remaining` | Requests remaining in current window |
+    | `X-RateLimit-Reset` | Unix seconds when window resets |
+    | `X-RateLimit-Bucket` | Which bucket this request counted against |
+
+    ---
+
+    ## Middleware-injected error responses
+
+    Two error responses are produced by middleware *before* the
+    handler runs, and apply to every route in the relevant class
+    rather than being declared on each operation:
+
+    - **`401 Unauthorized`** — emitted by the auth middleware on
+      every authenticated route (any operation that does NOT
+      declare `security: []`). Wire `code` is one of the `AUTH_*`
+      codes in §9.5.1 (missing / malformed signature, actor
+      mismatch, timestamp skew, nonce-not-greater, delegate
+      revoked). See `#/components/responses/Unauthorized`.
+
+    - **`429 Too Many Requests`** — emitted by the rate-limit
+      middleware on every route (public reads included). Wire
+      `code` is `RATE_LIMIT_EXCEEDED`; response carries the
+      `Retry-After` header plus the `X-RateLimit-*` triplet.
+      See `#/components/responses/TooManyRequests`.
+
+    Per-operation `responses:` blocks below list only the
+    *handler-emitted* status codes; treat 401 (when authenticated)
+    and 429 (always) as implicit on every operation. SDK
+    generators that need every code explicitly should expand the
+    referenced shared components into each operation as a
+    post-processing step.
+  version: 1.0.0
+  contact:
+    name: EMG Protocol
+servers:
+  - url: https://api.emg.awp.network/v1
+    description: Production
+  - url: http://localhost:8080/v1
+    description: Local dev
+
+security:
+  - signatureV1: []
+
+paths:
+  /auth/info:
+    get:
+      summary: Get authentication info for clients
+      description: Returns protocol version, required headers, and server time for time-sync
+      security: []
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuthInfo'
+
+  /auth/time:
+    get:
+      summary: Lightweight server-clock probe
+      description: |
+        Returns just the server's current Unix timestamp. Use this for
+        clock-skew correction when the full /auth/info payload is
+        unnecessary. Public, no auth.
+      security: []
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [server_time_unix]
+                properties:
+                  server_time_unix:
+                    type: integer
+                    format: int64
+                    description: Server wall-clock as Unix seconds.
+
+  /epochs/current:
+    get:
+      summary: Get current epoch info
+      security: []
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EpochInfo'
+
+  /epochs/{market_id}:
+    get:
+      summary: Get a specific epoch's info
+      security: []
+      parameters:
+        - $ref: '#/components/parameters/MarketId'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EpochInfo'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /epochs/{market_id}/results:
+    get:
+      summary: Get settlement results for an epoch
+      security: []
+      parameters:
+        - $ref: '#/components/parameters/MarketId'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EpochResults'
+        '404':
+          description: Epoch not yet settled
+
+  /epochs/{market_id}/votes:
+    post:
+      summary: Submit a signed vote
+      description: |
+        Submit an EIP-712-signed vote containing (vote, prediction, nonce).
+        The signature is over an `EMGVote` typed-data struct using the
+        Staker's secp256k1 key — the same key used for transport auth.
+        Server verifies via ecrecover, requires nonce strictly greater than
+        the previous submission's nonce for this (Staker, epoch), then stores
+        the vote.
+        
+        Vote contents remain **private** to the server during Phase 1 and
+        Phase 2 — other Stakers and external APIs cannot read them. Contents
+        are published at settlement (Tuesday UTC 12:00).
+        
+        To update a previously submitted vote, call this again with a higher
+        nonce. Only the highest-nonce vote per Staker enters the Merkle tree.
+      parameters:
+        - $ref: '#/components/parameters/MarketId'
+        - name: X-Idempotency-Key
+          in: header
+          required: false
+          schema:
+            type: string
+            maxLength: 255
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SignedVoteRequest'
+      responses:
+        '202':
+          description: Vote accepted and durably logged to WAL
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VoteReceipt'
+        '401':
+          description: |
+            Body-level vote signature (`EMGVote` typed data) failed
+            to recover to the request `actor`. Distinct from the
+            transport-level EMG-SIG-V1 401 — that one is injected by
+            auth middleware against the `EMGRequest` typed data
+            before this handler runs. The body-sig 401 fires when
+            the transport sig was valid but the per-vote
+            `signature` field over the EMGVote struct doesn't
+            recover to the `principal`. Wire codes:
+            `AUTH_MALFORMED_SIGNATURE` or `AUTH_ACTOR_MISMATCH`.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '403':
+          description: Not in voting phase, or vote epoch does not match current
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '404':
+          description: |
+            Epoch id in the path does not correspond to any known
+            epoch row (`STATE_EPOCH_NOT_FOUND`). Distinct from 403
+            phase-mismatch — 403 means the epoch exists but isn't
+            currently in voting phase; 404 means the epoch is
+            unknown to the server (not yet opened, or beyond
+            partition retention).
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '409':
+          description: Nonce not strictly greater than previous submission
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '422':
+          description: |
+            Vector not a valid probability simplex
+            (`VALIDATION_SIMPLEX_CONSTRAINT_VIOLATED`).
+
+            **Note**: vote-signature failures listed in earlier spec
+            drafts as 422 are emitted by the implementation as 401
+            with `AUTH_ACTOR_MISMATCH` / `AUTH_MALFORMED_SIGNATURE`
+            (per §9.5.1 codebook). The 422 was never shipped as a
+            wire contract — no back-compat concern; clients must
+            handle 401 for vote-signature failures, not 422.
+
+            **Note**: idempotency-key reuse is 409
+            `STATE_IDEMPOTENCY_KEY_MISMATCH` (NOT 422 — the §9.4
+            spec text suggesting 422 is reconciled to 409 via the
+            §9.5.1 codebook). Clients should branch on `code`, not
+            status.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+    get:
+      summary: List votes for an epoch (tier 3 — paginated)
+      description: |
+        Returns all final (highest-nonce per Staker) votes with full content.
+        **Only populated after settlement** (Phase 3). During Phase 1/2, this
+        endpoint returns 403 Forbidden.
+        
+        Agents can read their own vote at any time via GET /v1/principals/{principal}/votes/{market_id}.
+      security: []
+      parameters:
+        - $ref: '#/components/parameters/MarketId'
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Cursor'
+      responses:
+        '200':
+          description: OK (settlement complete)
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, pagination]
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/RevealedVote'
+                  pagination:
+                    $ref: '#/components/schemas/Pagination'
+        '403':
+          description: Votes not yet public (epoch still in Phase 1 or Phase 2)
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '404':
+          description: |
+            Epoch id does not correspond to any known epoch
+            (`STATE_EPOCH_NOT_FOUND`). Returned when the path
+            `market_id` is unknown to the server (not yet opened or
+            beyond partition retention). Distinct from 403, which
+            requires the epoch to exist but be in a pre-settlement
+            phase.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+
+  /epochs/{market_id}/voters:
+    get:
+      summary: List Stakers that submitted votes (tier 3 — paginated)
+      description: |
+        Returns the list of Staker IDs that have submitted at least one vote
+        in this epoch, with their latest nonce and timestamp. Vote **contents**
+        are not included — use GET /votes for that (post-settlement only).
+        
+        Callable in any phase. Useful for participation dashboards.
+      security: []
+      parameters:
+        - $ref: '#/components/parameters/MarketId'
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Cursor'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, pagination]
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/VoterSummary'
+                  pagination:
+                    $ref: '#/components/schemas/Pagination'
+
+  /epochs/{market_id}/merkle-root:
+    get:
+      summary: Get the Merkle root for this epoch's votes
+      description: |
+        Returns the Merkle root of all final votes for this epoch, computed at
+        Phase 1 close (Thursday UTC 12:00). Returns 404 until the root has
+        been computed.
+        
+        The root is also submitted on-chain via the RootNet contract; use that
+        for authoritative audit. This endpoint exists for client convenience.
+      security: []
+      parameters:
+        - $ref: '#/components/parameters/MarketId'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MerkleRootResponse'
+        '404':
+          description: Root not yet computed (epoch still in Phase 1)
+
+  /epochs/{market_id}/votes/{principal}/proof:
+    get:
+      summary: Get Merkle inclusion proof for an Staker's vote
+      description: |
+        Returns the Merkle proof that the given Staker's vote is included in the
+        epoch's committed Merkle tree. The proof can be verified against the
+        on-chain root via the RootNet contract's verifyVoteInclusion().
+        
+        Returns 404 if the Staker did not submit a vote, or if the Merkle root
+        has not yet been committed.
+      security: []
+      parameters:
+        - $ref: '#/components/parameters/MarketId'
+        - name: principal
+          in: path
+          required: true
+          schema:
+            type: string
+            format: eth-address
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MerkleInclusionProof'
+        '400':
+          description: |
+            Path `principal` segment is not a valid 20-byte hex
+            address (`VALIDATION_MALFORMED_JSON`).
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '403':
+          description: |
+            Reveal gate not yet fired (`STATE_VOTES_NOT_REVEALED`):
+            the epoch is still in Phase 1 (`VotingAndTrading`) or
+            Phase 2 (`TradingOnly`) and the `vote_merkle_commitments`
+            row hasn't been inserted at the Phase 2 → Phase 3
+            boundary. Distinct from 404 — the principal's
+            participation is intentionally hidden until reveal.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '404':
+          description: |
+            Reveal gate fired but the queried principal didn't
+            submit a final vote in this epoch
+            (`STATE_VOTE_NOT_FOUND`). The handler verifies
+            `merkle_root(stored_leaves) == commitment.merkle_root`
+            BEFORE the principal-not-found lookup, so a corrupted
+            DB always surfaces as 500 (never as a misleading 404).
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+
+  /epochs/{market_id}/votes/{principal}/history:
+    get:
+      summary: Get a Staker's full vote submission history in this epoch (tier 3 — paginated)
+      description: |
+        Returns all votes (not just the final one) submitted by this Staker in
+        this epoch, ordered by nonce ascending. Only available after settlement.
+        
+        Useful for auditing vote-evolution behavior.
+      security: []
+      parameters:
+        - $ref: '#/components/parameters/MarketId'
+        - name: principal
+          in: path
+          required: true
+          schema:
+            type: string
+            format: eth-address
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Cursor'
+      responses:
+        '200':
+          description: OK (post-settlement)
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, pagination]
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/RevealedVote'
+                  pagination:
+                    $ref: '#/components/schemas/Pagination'
+        '400':
+          description: |
+            Path `principal` segment is not a valid 20-byte hex
+            address (`VALIDATION_MALFORMED_JSON`).
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '403':
+          description: Votes not yet public
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '404':
+          description: |
+            Epoch id does not correspond to any known epoch
+            (`STATE_EPOCH_NOT_FOUND`). Distinct from 403 — 404
+            means the epoch is unknown to the server, 403 means
+            the epoch exists but its votes aren't yet public.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+
+  /epochs/{market_id}/phase:
+    get:
+      summary: Get the current lifecycle phase of an epoch
+      description: |
+        Returns which phase of the Epoch is currently active. Polling this is
+        the simplest way for clients to decide whether voting or trading
+        endpoints will accept their requests. For live updates, subscribe to
+        the `phase` WebSocket channel instead.
+      security: []
+      parameters:
+        - $ref: '#/components/parameters/MarketId'
+      responses:
+        '200':
+          description: Phase info
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [market_id, phase, phase_started_at, next_transition_at]
+                properties:
+                  market_id:
+                    type: integer
+                    format: int64
+                  phase:
+                    type: string
+                    enum: [VotingAndTrading, TradingOnly, Settlement, Reporting]
+                    description: |
+                      - `VotingAndTrading` (Wed 12:00 UTC → Thu 12:00 UTC): vote and trade
+                      - `TradingOnly`       (Thu 12:00 UTC → Tue 12:00 UTC): trade only
+                      - `Settlement`        (Tue 12:00 UTC → Wed 11:30 UTC): settlement pipeline running
+                      - `Reporting`         (Wed 11:30 UTC → next Wed 12:00 UTC): read-only window
+                  phase_started_at:
+                    type: string
+                    format: date-time
+                  next_transition_at:
+                    type: string
+                    format: date-time
+                    description: UTC timestamp of the next scheduled phase boundary
+                  next_phase:
+                    type: string
+                    enum: [VotingAndTrading, TradingOnly, Settlement, Reporting]
+                    nullable: true
+                    description: |
+                      The phase that follows `phase` within this same
+                      epoch. `null` when `phase` is `Reporting` — the
+                      next boundary belongs to the *next epoch's*
+                      `VotingAndTrading` rather than a new phase
+                      within this epoch. Clients reading
+                      `next_phase: null` know to roll to the next
+                      market_id at `next_transition_at`.
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /orders:
+    get:
+      summary: List orders (tier 2 — cursor-paginated)
+      parameters:
+        - name: principal
+          in: query
+          schema:
+            type: string
+            format: eth-address
+        - name: market_id
+          in: query
+          schema:
+            type: integer
+        - name: worknet_id
+          in: query
+          schema:
+            type: integer
+        - name: status
+          in: query
+          schema:
+            type: string
+            enum: [active, partially_filled, filled, cancelled, expired, rejected]
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Cursor'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, pagination]
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/OrderResponse'
+                  pagination:
+                    $ref: '#/components/schemas/Pagination'
+        '400':
+          description: |
+            `?principal=` query parameter does not match the
+            authenticated principal (`VALIDATION_MALFORMED_JSON`).
+            The Manager-on-behalf-of-Staker pattern uses the
+            `X-EMG-Principal` header (validated by the auth layer);
+            the querystring filter is a defense-in-depth check that
+            never broadens visibility past what the auth layer
+            authorized.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+    post:
+      summary: Submit a trading order
+      description: |
+        Submit a buy or sell order. Smart routing is applied automatically —
+        the system selects the cheapest execution path (direct order book or synthesis).
+
+        **Response semantics** (ADR-014): this endpoint is asynchronous. A `202 Accepted`
+        means the matcher has durably persisted the order to its WAL (ADR-012). Any fills
+        that executed synchronously during order intake are included in `initial_fills`.
+        Subsequent fills arrive via the WebSocket `fills.me` subscription — clients that
+        need to track fill progression MUST subscribe there; polling `GET /v1/orders/{id}`
+        repeatedly is discouraged.
+
+        Optional header `X-Idempotency-Key` for safe retries (Stripe-style semantics).
+      parameters:
+        - name: X-Idempotency-Key
+          in: header
+          required: false
+          schema:
+            type: string
+            maxLength: 255
+          description: |
+            Client-chosen idempotency token (UUIDv7 recommended). Server caches the response
+            for 24h keyed by `(principal, key)`. Re-submission with the same key and same body
+            returns the cached response; same key with different body returns
+            `409 STATE_IDEMPOTENCY_KEY_MISMATCH` (the §9.5.1 codebook canonicalizes the
+            spec §9.4 step 5 example's 422 to 409; the wire emits 409).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateOrderRequest'
+      responses:
+        '202':
+          description: |
+            Order accepted and durably logged to WAL. Any synchronous fills are in `initial_fills`;
+            further fills will arrive via WebSocket `fills.me`.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OrderAcceptedResponse'
+        '400':
+          description: Malformed request (unparseable, missing required fields)
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '409':
+          description: |
+            State conflict — post-only would cross, STP triggered, or epoch phase disallows submission
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '422':
+          description: |
+            Semantic validation failure — insufficient balance, tick size mismatch,
+            min notional, WorkNet retired. Idempotency-key reuse is 409
+            `STATE_IDEMPOTENCY_KEY_MISMATCH` (see the X-Idempotency-Key parameter
+            description above), NOT 422.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+
+  /orders/synthesize:
+    post:
+      summary: Synthesize a target-WorkNet buy via the Smart Order Router (R8-D)
+      description: |
+        Acquires `quantity` shares of `worknet_id` (Buy-only) by routing
+        through the Smart Order Router. The router considers two cost
+        sources at every marginal step:
+
+        - **Direct**: matching against the target WorkNet's ask side.
+        - **Synthesis**: splitting 1 chip → 1 share on every WorkNet,
+          then selling each non-target share at its best bid. Net cost
+          per share = `1 - Σ best_bid(non-target)`.
+
+        The handler returns the typical `202 Accepted` envelope with
+        `actual_quantity` (how many shares actually filled across direct
+        + synthesis legs) and `slippage_quantity` (gap between the plan
+        and the live book at execution time).
+
+        **Auth + idempotency**: same policy as `POST /v1/orders`
+        (auth required, `X-Idempotency-Key` honored).
+      parameters:
+        - name: X-Idempotency-Key
+          in: header
+          required: false
+          schema:
+            type: string
+            maxLength: 255
+          description: |
+            Stripe-style 24h response cache key. See `POST /orders` for
+            full semantics.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SynthesizeOrderRequest'
+      responses:
+        '202':
+          description: |
+            Plan executed. `actual_quantity` reports the realized fill;
+            `slippage_quantity` reports the live-book drift between
+            planning and execution.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SynthesizeAcceptedResponse'
+        '400':
+          description: Malformed request (negative ids, qty ≤ 0, max_price ∉ (0,1))
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '409':
+          description: |
+            Plan empty / insufficient liquidity across direct + synthesis
+            (`BUSINESS_INSUFFICIENT_BALANCE` carries `required` =
+            requested qty / cost and `available` = routable qty / cap).
+            Also surfaces here when `max_price × quantity` is below the
+            cheapest plan cost.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '503':
+          description: Matcher runtime not wired or market not currently spawned
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+
+  /orders/{order_id}:
+    get:
+      summary: Get order by ID (tier 2 — cached; subscribe for real-time)
+      parameters:
+        - $ref: '#/components/parameters/OrderId'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OrderResponse'
+        '403':
+          description: |
+            Order exists but is owned by a different principal
+            (`BUSINESS_ORDER_NOT_OWNED`). Distinct code from 404
+            `BUSINESS_ORDER_NOT_FOUND` — clients can tell
+            forgotten-id from not-yours.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '404':
+          description: |
+            Order id unknown to the server (never existed, or the
+            partition retention policy dropped it). Code:
+            `BUSINESS_ORDER_NOT_FOUND`.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+
+    delete:
+      summary: Cancel an order
+      description: |
+        Requests cancellation of the specified order. The response is a **cancel receipt**
+        (ADR-014 §2) that describes the actual outcome — the order may have been partially
+        or fully filled by the time the cancel was processed.
+
+        Check `status` to determine what happened:
+        - `cancelled` — order was fully cancelled; nothing filled
+        - `partially_filled_then_cancelled` — some quantity filled before cancel took effect
+        - `already_fully_filled` — cancel arrived after complete fill (no-op)
+        - `already_cancelled` — redundant cancel (no-op)
+      parameters:
+        - $ref: '#/components/parameters/OrderId'
+      responses:
+        '200':
+          description: Cancel processed. Inspect `status` for actual outcome.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CancelReceipt'
+        '403':
+          description: |
+            Order exists but is owned by a different principal
+            (`BUSINESS_ORDER_NOT_OWNED`). Distinct from 404 so
+            clients can tell forgotten-id from not-yours, the same
+            distinction the matching `GET /orders/{order_id}`
+            block makes.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '404':
+          description: Order not found (never existed or retention dropped it)
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+
+  /orders/cancel-batch:
+    post:
+      summary: Cancel multiple orders in one call
+      description: |
+        Cancel up to 500 orders in a single call. Each returns its own cancel receipt.
+        Cancels are processed independently — a failure on one does not stop others.
+
+        Rate-limited under bucket `orders-cancel` (separate from submit), so bulk cancels
+        do not consume the submit quota.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [order_ids]
+              properties:
+                order_ids:
+                  type: array
+                  maxItems: 500
+                  items:
+                    type: string
+                    format: uuid
+      responses:
+        '200':
+          description: |
+            All cancels processed; inspect each result.
+            Cancels are processed independently — per-id failures
+            (unknown order id, not-owned-by-this-principal) land as
+            error rows in the same `results` array, NOT as the
+            request-level HTTP envelope. Clients SHOULD branch on
+            each result's shape: a `CancelReceipt` for success,
+            a `CancelBatchError` for failures.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [results]
+                properties:
+                  results:
+                    type: array
+                    items:
+                      oneOf:
+                        - $ref: '#/components/schemas/CancelReceipt'
+                        - $ref: '#/components/schemas/CancelBatchError'
+        '400':
+          description: |
+            Malformed body, empty `order_ids`, or `order_ids` length
+            > 500 (`VALIDATION_MALFORMED_JSON`).
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+
+  /orders/cancel-all:
+    post:
+      summary: Cancel all active orders for the authenticated Principal
+      description: |
+        Cancels every active and partially-filled order for the authenticated Principal.
+        Optional `worknet_id` filter to cancel only within one WorkNet.
+
+        Rate-limited under bucket `orders-cancel`. Returns a summary of how many were
+        cancelled; individual cancel receipts are NOT returned (use /cancel-batch for that).
+      parameters:
+        - name: worknet_id
+          in: query
+          required: false
+          schema:
+            type: integer
+      responses:
+        '200':
+          description: |
+            Bulk cancel completed. Always 200 OK — partial progress is
+            reflected in `cancelled_count`, and any matcher dispatch
+            error during the call is surfaced via the optional
+            `partial_error` field rather than as an HTTP error
+            envelope (mirrors `/cancel-batch`'s per-id error pattern).
+            This means the client never sees `cancelled_count` hidden
+            behind a 503/429: a retry's `not_cancellable_count` won't
+            be inflated by orders the previous call already cancelled.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [cancelled_count, not_cancellable_count, processed_at]
+                properties:
+                  cancelled_count:
+                    type: integer
+                  not_cancellable_count:
+                    type: integer
+                  processed_at:
+                    type: string
+                    format: date-time
+                  partial_error:
+                    description: |
+                      Set iff at least one matcher dispatch errored
+                      while the call was in progress. The summary
+                      counts above reflect partial progress made
+                      before the error surfaced. Cancel is
+                      idempotent — clients retry against the
+                      residual.
+                    type: object
+                    required: [code, detail]
+                    properties:
+                      code:
+                        type: string
+                        description: §9.5.1 codebook entry for the first matcher error.
+                      detail:
+                        type: string
+                        description: Human-readable diagnostic from the error envelope.
+
+  /positions/split:
+    post:
+      summary: Split chips into an N-tuple of outcome shares
+      description: |
+        Executes the Polymarket-style Split primitive: 1 chip → N shares (one per WorkNet).
+        No counterparty needed.
+
+        Async write (ADR-014 §1): `202 Accepted` returned after matcher's WAL commit.
+        Subsequent state updates arrive via the WebSocket `account` subscription.
+      parameters:
+        - name: X-Idempotency-Key
+          in: header
+          required: false
+          schema:
+            type: string
+            maxLength: 255
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [quantity]
+              properties:
+                quantity:
+                  type: string
+                  description: Decimal quantity of chips to split
+                  example: "10.0"
+      responses:
+        '202':
+          description: Split accepted and durably logged
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StakerEpochState'
+        '400':
+          description: |
+            Malformed request body or invalid quantity (≤ 0):
+            `VALIDATION_INVALID_QUANTITY` / `VALIDATION_MALFORMED_JSON`.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '409':
+          description: |
+            Insufficient chips for the requested split (`BUSINESS_INSUFFICIENT_BALANCE`).
+            Codebook §9.5.1 maps this code to 409; the matching response on
+            `POST /positions/merge` is similarly 409 for `BUSINESS_INSUFFICIENT_SHARES`.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '422':
+          description: |
+            Idempotency-key reuse (`STATE_IDEMPOTENCY_KEY_MISMATCH` —
+            same `X-Idempotency-Key` reused with a different request body).
+            Insufficient-chips cases land in 409 above; bad-quantity cases
+            land in 400.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+
+  /positions/merge:
+    post:
+      summary: Merge N shares back to chips
+      description: |
+        Executes the Polymarket-style Merge primitive: requires at least `quantity`
+        shares in every WorkNet.
+
+        Async write (ADR-014 §1): `202 Accepted` returned after matcher's WAL commit.
+      parameters:
+        - name: X-Idempotency-Key
+          in: header
+          required: false
+          schema:
+            type: string
+            maxLength: 255
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [quantity]
+              properties:
+                quantity:
+                  type: string
+                  example: "5.0"
+      responses:
+        '202':
+          description: Merge accepted and durably logged
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StakerEpochState'
+        '400':
+          description: |
+            Malformed body or invalid quantity
+            (`VALIDATION_MALFORMED_JSON` / `VALIDATION_INVALID_QUANTITY`).
+            Symmetric with `POST /positions/split`'s 400.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '409':
+          description: |
+            Insufficient shares in one or more WorkNets
+            (`BUSINESS_INSUFFICIENT_SHARES`). Codebook §9.5.1.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '422':
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+
+  /principals/{principal}/state:
+    get:
+      summary: Get current Staker epoch state
+      parameters:
+        - name: principal
+          in: path
+          required: true
+          schema:
+            type: string
+            format: eth-address
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StakerEpochState'
+        '404':
+          description: |
+            No `principal_current_state` row for this
+            (epoch, principal) pair (`STATE_PRINCIPAL_NOT_IN_EPOCH`).
+            Returned when the principal had zero AWP Power at
+            epoch open (excluded from the snapshot per
+            `WorkNet投票协议` §AWP integration rule 3) or when
+            `?market_id=N` references an epoch the principal
+            wasn't part of.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+
+  /principals/{principal}/power:
+    get:
+      summary: Get AWP Power snapshot for a Staker at a specific epoch
+      description: |
+        Returns the Staker's AWP Power (time-weighted veAWP voting power,
+        aggregated across chains) at the given epoch's open snapshot.
+        Includes per-chain and per-position (tokenId) breakdown for audit.
+        Values are fixed at epoch open (Wed UTC 12:00).
+
+        **Self-only**: the path `{principal}` MUST equal the
+        authenticated principal; mismatch returns `401
+        AUTH_UNAUTHORIZED_DELEGATE`.
+      parameters:
+        - name: principal
+          in: path
+          required: true
+          schema:
+            type: string
+            format: eth-address
+        - name: market_id
+          in: query
+          required: false
+          description: Defaults to current epoch.
+          schema:
+            type: integer
+            format: int64
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PrincipalPower'
+        '404':
+          description: No snapshot exists for this principal at this epoch (no veAWP holdings)
+
+  /principals/{principal}/managers:
+    get:
+      summary: List active Managers authorized for a Staker
+      description: |
+        Returns the addresses authorized via AWPRegistry.grantDelegate(manager)
+        for the given Staker. Any of these may submit EMG requests on the
+        Staker's behalf.
+        Data sourced from api.awp.sh; reflects current chain state, not an
+        epoch-pinned snapshot.
+
+        **Self-only**: the path `{principal}` MUST equal the
+        authenticated principal; mismatch returns `401
+        AUTH_UNAUTHORIZED_DELEGATE`.
+      parameters:
+        - name: principal
+          in: path
+          required: true
+          schema:
+            type: string
+            format: eth-address
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  principal:
+                    type: string
+                    format: eth-address
+                  managers:
+                    type: array
+                    items:
+                      type: string
+                      format: eth-address
+                  checked_at:
+                    type: string
+                    format: date-time
+
+  /principals/{principal}/recipient:
+    get:
+      summary: Get resolved reward recipient for a Staker at settlement
+      description: |
+        Returns the address that received Gov Tokens on behalf of this Staker
+        for the given epoch's settlement. Result of walking AWPRegistry's
+        boundTo chain and reading recipient. Available only after the epoch
+        has settled.
+
+        **Self-only**: the path `{principal}` MUST equal the
+        authenticated principal; mismatch returns `401
+        AUTH_UNAUTHORIZED_DELEGATE`.
+      parameters:
+        - name: principal
+          in: path
+          required: true
+          schema:
+            type: string
+            format: eth-address
+        - name: market_id
+          in: query
+          required: false
+          description: Defaults to most recent settled epoch.
+          schema:
+            type: integer
+            format: int64
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  market_id:
+                    type: integer
+                    format: int64
+                  principal:
+                    type: string
+                    format: eth-address
+                  recipient_address:
+                    type: string
+                    format: eth-address
+                  is_self:
+                    type: boolean
+                    description: True if recipient equals principal (no routing).
+        '404':
+          description: Epoch not yet settled, or Staker earned no Gov Tokens
+
+  /principals/{principal}/votes/{market_id}:
+    get:
+      summary: Read the principal's own final revealed vote for an epoch
+      description: |
+        Returns the authenticated principal's `RevealedVote` for the
+        given `market_id` — vote vector, prediction vector, nonce, and
+        signature. Self-only — the path principal MUST equal the
+        authenticated principal (mismatch is 401
+        `AUTH_UNAUTHORIZED_DELEGATE`).
+
+        Reveal-gated: returns 403 `STATE_VOTES_NOT_REVEALED` until the
+        epoch's `vote_merkle_commitments` row exists (Phase 2→3
+        boundary fired). After reveal, the principal can read their
+        own vote at any phase.
+      parameters:
+        - name: principal
+          in: path
+          required: true
+          schema:
+            type: string
+            format: eth-address
+        - $ref: '#/components/parameters/MarketId'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RevealedVote'
+        '401':
+          description: Path principal does not match the authenticated principal.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '403':
+          description: Votes not yet public (epoch still in Phase 1 or Phase 2).
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '404':
+          description: |
+            Either the epoch is unknown (`STATE_EPOCH_NOT_FOUND`) or
+            the principal didn't submit a final vote in this epoch
+            (`STATE_VOTE_NOT_FOUND`).
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+
+  /fills:
+    get:
+      summary: List fill history with attribution (private; self-only)
+      description: |
+        Returns the authenticated principal's fills, newest-first,
+        with optional worknet + time-range filters. Always
+        server-scoped to the EMG-SIG-V1 caller — no `principal`
+        querystring exists; visibility is the auth context's
+        `principal`, full stop.
+
+        Cursor is opaque (base64url-encoded composite of
+        `(filled_at, fill_id)`). Clients persist the previous
+        page's `pagination.next_cursor` and pass it back as
+        `cursor` to fetch the next page; treating cursors as
+        opaque protects clients from any future encoding change.
+
+        Real-time fills land on the WebSocket `fills.me`
+        channel; this endpoint exists for cold catch-up + the
+        backfill path between two `fills.me` subscriptions.
+      parameters:
+        - name: worknet_id
+          in: query
+          required: false
+          schema:
+            type: integer
+            format: int32
+            minimum: 0
+          description: Restrict to fills for one worknet.
+        - name: since
+          in: query
+          required: false
+          schema:
+            type: string
+            format: date-time
+          description: |
+            Inclusive lower bound on `filled_at`. RFC-3339 /
+            ISO-8601. Combined with `until`, must satisfy
+            `since <= until`.
+        - name: until
+          in: query
+          required: false
+          schema:
+            type: string
+            format: date-time
+          description: Inclusive upper bound on `filled_at`.
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Cursor'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, pagination]
+                properties:
+                  data:
+                    type: array
+                    items:
+                      type: object
+                      description: |
+                        Wire shape mirrors `emg_persistence::Fill`
+                        (fill_id, order_id, counterparty_order_id,
+                        principal, market_id, worknet_id, side,
+                        price, quantity, filled_at). Decimal
+                        fields use scale 18 string encoding;
+                        `principal` is 0x-prefixed lowercase hex.
+                  pagination:
+                    $ref: '#/components/schemas/Pagination'
+        '400':
+          description: |
+            Malformed cursor / out-of-range limit / inverted
+            time range (`since > until`). Wire `code` is
+            `VALIDATION_MALFORMED_JSON`.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+
+  /markets:
+    get:
+      summary: List markets (public, optional status / worknet filter)
+      description: |
+        Returns every market visible to the public, newest-first.
+        Optional `status` and `worknet_id` query parameters filter
+        client-side common cases ("active markets only", "markets
+        touching this worknet") server-side without requiring the
+        client to download the full list.
+      security: []
+      parameters:
+        - name: status
+          in: query
+          required: false
+          description: |
+            Filter by lifecycle status. One of `pending`,
+            `voting_and_trading`, `trading_only`, `settling`,
+            `completed`. Invalid values return 400
+            `VALIDATION_MALFORMED_JSON`.
+          schema:
+            type: string
+            enum: [pending, voting_and_trading, trading_only, settling, completed]
+        - name: worknet_id
+          in: query
+          required: false
+          description: Filter to markets that have an association with this worknet.
+          schema:
+            type: integer
+            format: int32
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items:
+                      type: object
+                      description: |
+                        Wire shape mirrors the admin endpoint's
+                        `MarketResponse` (id, name, description,
+                        voting_open_at, voting_close_at,
+                        trading_close_at, settled_at, status,
+                        total_gov_emission, epistemic_prior_strategy,
+                        created_by_principal, created_at, worknets).
+        '400':
+          description: Unknown `status` value.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+
+  /markets/{market_id}/worknets/{worknet_id}/book:
+    get:
+      summary: Get order book snapshot (tier 2 — Redis-cached, ~100ms lag)
+      description: |
+        Returns a top-N snapshot of the (`market_id`, `worknet_id`) order
+        book. Served from the Redis cache populated by the matcher every
+        100ms (ADR-013). For real-time updates, subscribe to the
+        WebSocket `book.{market_id}.{worknet_id}` channel instead.
+      security: []
+      parameters:
+        - name: market_id
+          in: path
+          required: true
+          schema:
+            type: integer
+            format: int64
+        - name: worknet_id
+          in: path
+          required: true
+          schema:
+            type: integer
+        - name: depth
+          in: query
+          schema:
+            type: integer
+            default: 20
+            minimum: 1
+            maximum: 200
+          description: Number of price levels per side. Max 200 (protective limit, ADR-014 §11).
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OrderBookSnapshot'
+        '400':
+          description: depth out of allowed range
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '404':
+          description: |
+            No matcher engine is spawned for this `(market_id, worknet_id)`
+            pair (market doesn't exist, isn't trading, or the worknet
+            isn't part of the market).
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+
+  /markets/{market_id}/worknets/{worknet_id}/klines:
+    get:
+      summary: Get K-line data (tier 2 — Redis read-through to continuous aggregates)
+      security: []
+      parameters:
+        - name: market_id
+          in: path
+          required: true
+          schema:
+            type: integer
+            format: int64
+        - name: worknet_id
+          in: path
+          required: true
+          schema:
+            type: integer
+        - name: interval
+          in: query
+          schema:
+            type: string
+            # Turn 6 reconciliation: previous spec listed '15m' but
+            # the persistence layer's continuous-aggregate views are
+            # 1m / 5m / 1h / 4h / 1d. Removed '15m' from the wire
+            # enum to match what the server actually accepts. Phase 7b
+            # Turn 3 added the `1d` continuous-aggregate; the wire
+            # contract now exposes it (matches channels.rs +
+            # schema.graphql, which are the production runtime).
+            enum: ['1m', '5m', '1h', '4h', '1d']
+            default: '1h'
+        - name: from
+          in: query
+          schema:
+            type: string
+            format: date-time
+        - name: to
+          in: query
+          schema:
+            type: string
+            format: date-time
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/KLine'
+        '404':
+          description: |
+            No matcher engine is spawned for this `(market_id, worknet_id)`
+            pair.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+
+  /reports:
+    post:
+      summary: Submit a WorkNet weekly report
+      description: Only WorkNet operators can submit reports for their own WorkNet.
+      parameters:
+        - name: X-Idempotency-Key
+          in: header
+          required: false
+          schema:
+            type: string
+            maxLength: 255
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/WeeklyReportRequest'
+      responses:
+        '202':
+          description: Report submitted
+        '400':
+          description: |
+            Malformed body (e.g., empty content, negative `worknet_id`,
+            oversized content): `VALIDATION_MALFORMED_JSON`.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '409':
+          description: |
+            Same `(market_id, worknet_id)` already submitted this epoch.
+            The DB enforces "one report per WorkNet per epoch" via the
+            UNIQUE constraint; surfaced as `STATE_IDEMPOTENCY_KEY_MISMATCH`
+            with `details.previous_hash = "epoch-worknet-collision"`.
+            Distinct from middleware-side idempotency-key reuse (also
+            409 with the same code), which carries a 64-char hex digest
+            in `previous_hash`. Clients dispatching on `details.previous_hash`
+            see "epoch-worknet-collision" (handler-side) vs a hex string
+            (middleware-side); the leading non-hex character makes the
+            two forms unambiguous.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '422':
+          description: |
+            Repo-side validation failure (e.g., `requested_share` outside
+            [0, 1] when present): surfaces as `VALIDATION_MALFORMED_JSON`.
+            (The 422 slot stays for future strict semantic-violation codes;
+            today most violations land in 400.)
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+    get:
+      summary: List weekly reports (tier 3 — paginated)
+      description: |
+        At least one of `market_id` or `worknet_id` is required. Omitting
+        both is rejected with 400 `VALIDATION_MALFORMED_JSON` — a
+        cross-table list with no filter would degrade to a full-table
+        scan and is never the dashboard query a client actually wants.
+      parameters:
+        - name: market_id
+          in: query
+          schema:
+            type: integer
+        - name: worknet_id
+          in: query
+          schema:
+            type: integer
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Cursor'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, pagination]
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/WeeklyReport'
+                  pagination:
+                    $ref: '#/components/schemas/Pagination'
+        '400':
+          description: |
+            Neither `market_id` nor `worknet_id` was supplied. The
+            cross-table form is intentionally not supported.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+
+  /comments:
+    post:
+      summary: Publish a comment
+      parameters:
+        - name: X-Idempotency-Key
+          in: header
+          required: false
+          schema:
+            type: string
+            maxLength: 255
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CommentRequest'
+      responses:
+        '202':
+          description: Comment created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Comment'
+        '400':
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+    get:
+      summary: List comments (tier 3 — paginated)
+      description: |
+        Filter axis is exclusive: `worknet_id` and `author_id` MUST NOT be
+        combined in the same request — the underlying indexes
+        (`idx_comments_worknet_time`, `idx_comments_author`) are
+        single-column, and a composite filter would degrade to a seq
+        scan. A 400 `VALIDATION_MALFORMED_JSON` is returned for the
+        combined form.
+
+        `sort=bridge_score` requires `market_id` (the bridge-score index
+        is per-epoch) and is exclusive with `author_id` (no per-author
+        bridge-score query exists). `market_id` is ONLY honored with
+        `sort=bridge_score`; combining it with `sort=recent` is rejected
+        with 400 `VALIDATION_MALFORMED_JSON` rather than silently
+        dropping the filter.
+      parameters:
+        - name: worknet_id
+          in: query
+          schema:
+            type: integer
+        - name: author_id
+          in: query
+          schema:
+            type: string
+        - name: market_id
+          in: query
+          schema:
+            type: integer
+          description: |
+            Required when `sort=bridge_score`. Rejected with 400 when
+            combined with `sort=recent` (no per-epoch index for the
+            recency listing).
+        - name: sort
+          in: query
+          schema:
+            type: string
+            enum: [recent, bridge_score]
+            default: recent
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Cursor'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, pagination]
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Comment'
+                  pagination:
+                    $ref: '#/components/schemas/Pagination'
+
+  /comments/{comment_id}/endorse:
+    post:
+      summary: Mark a comment as helpful
+      parameters:
+        - name: comment_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Endorsed (or no-op if already endorsed)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  comment_id:
+                    type: string
+                    format: uuid
+                  was_new_endorsement:
+                    type: boolean
+                    description: true if this call added an endorsement; false if already endorsed
+        '400':
+          description: |
+            Path `comment_id` segment is not a valid UUID. Emitted
+            by axum's `Path<Uuid>` extractor before the handler
+            runs, so the 400 short-circuits ahead of the
+            comment-existence check.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '404':
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+
+  /leaderboard/epistemic:
+    get:
+      summary: Top Stakers by epistemic score (tier 3 — paginated)
+      security: []
+      parameters:
+        - name: market_id
+          in: query
+          schema:
+            type: integer
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Cursor'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, pagination]
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/LeaderboardEntry'
+                  pagination:
+                    $ref: '#/components/schemas/Pagination'
+
+components:
+  parameters:
+    MarketId:
+      name: market_id
+      in: path
+      required: true
+      schema:
+        type: integer
+        minimum: 0
+
+    OrderId:
+      name: order_id
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+
+    Limit:
+      name: limit
+      in: query
+      required: false
+      schema:
+        type: integer
+        minimum: 1
+        default: 100
+        maximum: 1000
+      description: Maximum items per page. Endpoint-specific maximum applies.
+
+    Cursor:
+      name: cursor
+      in: query
+      required: false
+      schema:
+        type: string
+      description: |
+        Opaque cursor from the previous page's `pagination.next_cursor`. Omit to start
+        from the first page. Cursors are server-generated; clients treat them as opaque
+        strings and do not parse them.
+
+  responses:
+    NotFound:
+      description: Resource not found
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+
+    ValidationError:
+      description: Request validation failed
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+
+    Unauthorized:
+      description: |
+        EMG-SIG-V1 authentication failed. The wire `code` is one of the
+        `AUTH_*` codes in §9.5.1 (missing / malformed signature, actor
+        mismatch, timestamp skew beyond ±30s, nonce not strictly
+        greater than the stored high-water mark, delegate revoked or
+        not authorized). Injected by the auth middleware before the
+        handler runs, so every authenticated route can emit it.
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+
+    TooManyRequests:
+      description: |
+        Rate limit exceeded for this principal under the route's
+        bucket (see §9.6). Wire `code` is `RATE_LIMIT_EXCEEDED`;
+        response carries `Retry-After` header (seconds) plus the
+        standard `X-RateLimit-Limit` / `-Remaining` / `-Reset`
+        triplet. Injected by the rate-limit middleware, so every
+        route can emit it independent of the handler.
+      headers:
+        Retry-After:
+          schema:
+            type: integer
+            minimum: 1
+          description: Seconds to wait before retrying.
+        X-RateLimit-Limit:
+          schema:
+            type: integer
+        X-RateLimit-Remaining:
+          schema:
+            type: integer
+        X-RateLimit-Reset:
+          schema:
+            type: integer
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+
+  securitySchemes:
+    signatureV1:
+      type: apiKey
+      in: header
+      name: X-EMG-Signature
+      description: |
+        **EMG-SIG-V1** — EIP-712 typed data signature authentication.
+        
+        Every authenticated request includes four headers:
+        - `X-EMG-Principal`: `0x`-prefixed hex, 20-byte Staker address
+        - `X-EMG-Actor`: `0x`-prefixed hex, 20 bytes. Optional — defaults to Principal. If Manager is signing, this is the Manager's address.
+        - `X-EMG-Nonce`: unsigned decimal integer, monotonic per (Staker, domain)
+        - `X-EMG-Timestamp`: unsigned decimal integer, Unix seconds UTC
+        - `X-EMG-Signature`: `0x`-prefixed hex, 65-byte ECDSA signature (r||s||v)
+        
+        **Signed material** is an EIP-712 typed data structure:
+        ```solidity
+        EMGRequest {
+          address principal  // Staker being acted upon
+          string  method     // "GET", "POST", "DELETE", "WS_HELLO"
+          string  path       // URL path
+          string  query      // Canonical query string (keys sorted), empty if none
+          bytes32 bodyHash   // keccak256(body); 0x00..00 if empty body
+          uint256 nonce      // Strictly greater than principal's previous nonce
+          uint256 timestamp  // Unix seconds; ±30s of server time
+        }
+        ```
+        
+        With EIP-712 domain:
+        ```
+        name: "EMG"
+        version: "1"
+        chainId: <configured>
+        verifyingContract: <configured>
+        ```
+        
+        **Signing**: any Ethereum wallet supporting `eth_signTypedData_v4`
+        (MetaMask, WalletConnect, Rabby, Safe, hardware wallets) signs EMG
+        requests natively. For server-side bots, use `alloy-signer-local` or
+        `k256` directly.
+        
+        **Verification**: server runs `ecrecover(digest, v, r, s)` to obtain the
+        signer address, compares it to `X-EMG-Actor`. If `actor == principal`,
+        the request is self-authorized. If `actor != principal`, server
+        checks `AWPRegistry.delegates(principal, actor)` via emg-chain.
+        
+        **Replay protection**: nonce must be strictly greater than the highest
+        nonce seen for this (principal, chainId, verifyingContract) tuple
+        (NOTE: tracked per-principal, not per-actor). Stored
+        in Redis with 7-day TTL.
+        
+        **Optional idempotency**: include `X-Idempotency-Key: <uuid-v7>` on
+        mutating requests for safe retry; server caches the response for 24h
+        keyed by (principal, key).
+        
+        See `spec/07-api.md` §9.3 for complete semantics and reference client code.
+
+  schemas:
+    AuthInfo:
+      type: object
+      properties:
+        protocol_version:
+          type: string
+          example: "v4.0"
+        server_time_unix:
+          type: integer
+          format: int64
+          example: 1745323200
+        signature_scheme:
+          type: string
+          example: "EMG-SIG-V1-EIP712"
+        eip712_domain:
+          type: object
+          description: EIP-712 domain parameters (client must use these verbatim)
+          properties:
+            name:
+              type: string
+              example: "EMG"
+            version:
+              type: string
+              example: "1"
+            chainId:
+              type: integer
+              example: 56
+            verifyingContract:
+              type: string
+              description: 0x-prefixed hex Ethereum address
+              example: "0x..."
+        eip712_primary_type:
+          type: string
+          example: "EMGRequest"
+        eip712_types:
+          type: object
+          description: |
+            The EMGRequest type definition, suitable for
+            eth_signTypedData_v4.
+          example:
+            EIP712Domain:
+              - { name: "name", type: "string" }
+              - { name: "version", type: "string" }
+              - { name: "chainId", type: "uint256" }
+              - { name: "verifyingContract", type: "address" }
+            EMGRequest:
+              - { name: "principal", type: "address" }
+              - { name: "method", type: "string" }
+              - { name: "path", type: "string" }
+              - { name: "query", type: "string" }
+              - { name: "bodyHash", type: "bytes32" }
+              - { name: "nonce", type: "uint256" }
+              - { name: "timestamp", type: "uint256" }
+        max_timestamp_skew_seconds:
+          type: integer
+          example: 30
+
+    EpochInfo:
+      type: object
+      required: [id, phase, opened_at, n_worknets]
+      properties:
+        id:
+          type: integer
+        phase:
+          type: string
+          enum: [voting_and_trading, trading_only, settlement, weekly_report, completed]
+        opened_at:
+          type: string
+          format: date-time
+        voting_closes_at:
+          type: string
+          format: date-time
+        trading_closes_at:
+          type: string
+          format: date-time
+        settled_at:
+          type: string
+          format: date-time
+          nullable: true
+        n_worknets:
+          type: integer
+        protocol_version:
+          type: string
+
+    EpochResults:
+      type: object
+      properties:
+        market_id:
+          type: integer
+        v_vector:
+          type: array
+          items:
+            type: string
+            format: decimal
+        p_open_vector:
+          type: array
+          items:
+            type: string
+            format: decimal
+        w_vector:
+          type: array
+          items:
+            type: string
+            format: decimal
+        total_gov_tokens:
+          type: string
+          format: decimal
+
+    SignedVoteRequest:
+      type: object
+      required: [vote, prediction, nonce, signature]
+      properties:
+        vote:
+          type: array
+          items:
+            type: string
+            format: decimal
+          description: N-dimensional probability vector (v_a), sums to 1
+        prediction:
+          type: array
+          items:
+            type: string
+            format: decimal
+          description: N-dimensional probability vector (f_a), sums to 1
+        nonce:
+          type: integer
+          format: int64
+          minimum: 1
+          description: |
+            Monotonic counter per (Staker, epoch). Each new submission for
+            this (Staker, epoch) must have nonce strictly greater than the
+            previous submission's nonce.
+        signature:
+          type: string
+          description: |
+            0x-prefixed hex, 65 bytes. secp256k1 ECDSA signature over the
+            EIP-712 digest of the `EMGVote` typed-data struct:
+            ```
+            EMGVote {
+              uint64  epoch
+              bytes32 voteHash       // keccak256(canonical_bytes(vote))
+              bytes32 predictionHash // keccak256(canonical_bytes(prediction))
+              uint64  nonce
+            }
+            ```
+            Domain: same as transport auth (EMG / 1 / chainId / verifyingContract).
+            Server recovers the signer address via ecrecover and matches it
+            against the submitters `X-EMG-Actor`.
+
+    VoteReceipt:
+      type: object
+      properties:
+        market_id:
+          type: integer
+        vote_id:
+          type: string
+          format: uuid
+        leaf_hash:
+          type: string
+          format: base64
+          description: SHA-256 hash of the Merkle leaf for this vote
+        nonce:
+          type: integer
+        received_at:
+          type: string
+          format: date-time
+
+    RevealedVote:
+      type: object
+      properties:
+        principal:
+          type: string
+          format: eth-address
+        market_id:
+          type: integer
+        vote:
+          type: array
+          items:
+            type: string
+            format: decimal
+        prediction:
+          type: array
+          items:
+            type: string
+            format: decimal
+        nonce:
+          type: integer
+        signature:
+          type: string
+          format: base64
+
+    VoterSummary:
+      type: object
+      properties:
+        principal:
+          type: string
+          format: eth-address
+        latest_nonce:
+          type: integer
+        latest_submission_at:
+          type: string
+          format: date-time
+
+    MerkleRootResponse:
+      type: object
+      properties:
+        market_id:
+          type: integer
+        merkle_root:
+          type: string
+          format: base64
+        vote_count:
+          type: integer
+        committed_at:
+          type: string
+          format: date-time
+        on_chain_tx_hash:
+          type: string
+          format: base64
+          nullable: true
+          description: Transaction hash of the on-chain commit, if already submitted
+
+    MerkleInclusionProof:
+      type: object
+      properties:
+        market_id:
+          type: integer
+        principal:
+          type: string
+        leaf_hash:
+          type: string
+          format: base64
+        leaf_index:
+          type: integer
+          description: 0-indexed position of the leaf in the sorted leaf array
+        siblings:
+          type: array
+          items:
+            type: string
+            format: base64
+          description: Sibling hashes from leaf to root (bottom-up)
+        merkle_root:
+          type: string
+          format: base64
+          description: The root the proof verifies against
+        vote_count:
+          type: integer
+          description: |
+            Number of leaves the committed root spans
+            (= `vote_merkle_commitments.vote_count` for this epoch).
+            External verifiers MUST enforce `leaf_index < vote_count`
+            before walking the sibling chain to defend against
+            CVE-2012-2459 (the duplicate-trailing-leaf Merkle attack
+            on power-of-two trees).
+
+    SynthesizeOrderRequest:
+      type: object
+      required: [market_id, worknet_id, quantity, max_price]
+      properties:
+        market_id:
+          type: integer
+          format: int64
+          description: Market id the request scopes to.
+        worknet_id:
+          type: integer
+          description: Target WorkNet — the worknet whose shares to acquire.
+        quantity:
+          type: string
+          format: decimal
+          description: Target-share quantity (must be > 0).
+        max_price:
+          type: string
+          format: decimal
+          description: |
+            Maximum per-share cost in chips, exclusive `(0, 1)`. The
+            handler multiplies by `quantity` to derive the planner's
+            total-cost cap; plans that would exceed the cap return
+            `409 BUSINESS_INSUFFICIENT_BALANCE`.
+
+    SynthesizeAcceptedResponse:
+      type: object
+      required: [order_id, status, actual_quantity, slippage_quantity, accepted_at]
+      properties:
+        order_id:
+          type: string
+          format: uuid
+          description: |
+            Aggregate id for this synthesize attempt. NOT a per-leg
+            order id — the per-leg engine submits each get their own
+            ids managed by the engine.
+        status:
+          type: string
+          enum: [filled, partially_filled, rejected]
+          description: |
+            Wire status derived from `actual_quantity` vs the
+            requested quantity.
+        actual_quantity:
+          type: string
+          format: decimal
+          description: |
+            Total shares filled across direct + synthesis phases.
+            Equal to `req.quantity` on a clean run.
+        slippage_quantity:
+          type: string
+          format: decimal
+          description: |
+            `req.quantity - actual_quantity`. Zero on a clean run;
+            positive when the live book drifted between planning
+            and execution.
+        accepted_at:
+          type: string
+          format: date-time
+
+    CreateOrderRequest:
+      type: object
+      required: [market_id, worknet_id, side, quantity]
+      properties:
+        market_id:
+          type: integer
+          format: int64
+          description: |
+            Phase 2A — market the order is bound to. The matcher
+            routes commands per `(market_id, worknet_id)` pair and
+            the order persists with the market scope. The handler
+            requires this field; an absent value is rejected with
+            `400 MARKET_NOT_ACCEPTING`.
+        worknet_id:
+          type: integer
+        side:
+          type: string
+          enum: [buy, sell]
+        quantity:
+          type: string
+          format: decimal
+          description: Must be a multiple of 0.00000001 (quantity step size)
+        limit_price:
+          type: string
+          format: decimal
+          description: |
+            If omitted, submitted as a market order. Must be a multiple of
+            0.0001 (tick size). Price × quantity must be ≥ 0.001 (min notional).
+        kind:
+          type: string
+          enum: [limit, market]
+          default: limit
+          description: |
+            Derived from limit_price if omitted (limit → limit_price set,
+            market → limit_price null).
+        time_in_force:
+          type: string
+          enum: [gtc, ioc, fok, gtt]
+          default: gtc
+          description: |
+            - `gtc` — Good-Til-Cancelled. Default. Rests until filled/cancelled/epoch-end.
+            - `ioc` — Immediate-Or-Cancel. Match what you can, cancel rest.
+            - `fok` — Fill-Or-Kill. All or nothing.
+            - `gtt` — Good-Til-Time. Requires `expires_at`.
+        expires_at:
+          type: string
+          format: date-time
+          description: Required when `time_in_force = gtt`; otherwise ignored.
+        post_only:
+          type: boolean
+          default: false
+          description: |
+            Reject the order if it would cross the book (take liquidity).
+            Guarantees maker-side behavior. Invalid with `market` kind.
+        reduce_only:
+          type: boolean
+          default: false
+          description: |
+            Order may only reduce existing exposure; reject if it would
+            increase position.
+        visible_quantity:
+          type: string
+          format: decimal
+          description: |
+            For iceberg orders. Only this much of `quantity` is visible on the
+            book at a time; engine auto-replenishes from the hidden remainder.
+            Must be < `quantity` and ≥ min_order_notional equivalent.
+        stp_mode:
+          type: string
+          enum: [cancel_maker, cancel_taker, cancel_both, decrement_taker]
+          default: cancel_both
+          description: |
+            Self-Trade Prevention mode, applied when this order would match
+            against the same Staker's resting order.
+        allow_synthesis:
+          type: boolean
+          default: true
+          description: |
+            Allow the router to use Split+Sell paths to synthesize fills when
+            direct book depth is insufficient.
+        client_order_id:
+          type: string
+          description: Optional Staker-side tag for reconciliation.
+
+    OrderResponse:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        principal:
+          type: string
+          description: 0x-prefixed Ethereum address
+        worknet_id:
+          type: integer
+        side:
+          type: string
+        kind:
+          type: string
+          enum: [limit, market]
+        limit_price:
+          type: string
+          format: decimal
+          nullable: true
+        total_quantity:
+          type: string
+          format: decimal
+        filled_quantity:
+          type: string
+          format: decimal
+        visible_quantity:
+          type: string
+          format: decimal
+          nullable: true
+        time_in_force:
+          type: string
+          enum: [gtc, ioc, fok, gtt]
+        expires_at:
+          type: string
+          format: date-time
+          nullable: true
+        post_only:
+          type: boolean
+        reduce_only:
+          type: boolean
+        stp_mode:
+          type: string
+        status:
+          type: string
+          enum: [active, partially_filled, filled, cancelled, expired, rejected]
+        avg_fill_price:
+          type: string
+          format: decimal
+          nullable: true
+        submitted_at:
+          type: string
+          format: date-time
+        closed_at:
+          type: string
+          format: date-time
+          nullable: true
+        rejection_reason:
+          type: string
+          nullable: true
+        client_order_id:
+          type: string
+          nullable: true
+        fills:
+          type: array
+          items:
+            $ref: '#/components/schemas/Fill'
+
+    Fill:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        price:
+          type: string
+          format: decimal
+        quantity:
+          type: string
+          format: decimal
+        filled_at:
+          type: string
+          format: date-time
+
+    StakerEpochState:
+      type: object
+      description: |
+        Full per-Epoch state for a Staker. Same shape as the GraphQL
+        `StakerEpochState` type (schema.graphql line 122). Returned by
+        `GET /v1/principals/{principal}/state`, `POST /v1/positions/split`,
+        `POST /v1/positions/merge`, and the corresponding GraphQL resolvers.
+
+        Settlement-populated fields (`pnl`, `a_score`, `closing_chips`,
+        `gov_tokens_received`, `epistemic_score_post`) are `null` until the
+        settlement pipeline completes for this epoch. See
+        `spec/06-persistence.md` §8 for the column lifecycle.
+      required:
+        - principal
+        - market_id
+        - stake
+        - chips_available
+        - chips_locked_in_orders
+        - max_capital_at_risk
+        - positions
+      properties:
+        principal:
+          type: string
+          format: eth-address
+        market_id:
+          type: integer
+          format: int64
+        stake:
+          type: string
+          format: decimal
+          description: s_S, AWP Power at Epoch open
+        chips_available:
+          type: string
+          format: decimal
+        chips_locked_in_orders:
+          type: string
+          format: decimal
+        max_capital_at_risk:
+          type: string
+          format: decimal
+          description: Peak capital committed to active trading (chips_locked + chips_in_positions), used for λ_part
+        positions:
+          type: array
+          items:
+            type: object
+            required: [worknet_id, shares]
+            properties:
+              worknet_id:
+                type: integer
+              shares:
+                type: string
+                format: decimal
+        # Settlement-populated (null before settlement):
+        pnl:
+          type: string
+          format: decimal
+          nullable: true
+        a_score:
+          type: string
+          format: decimal
+          nullable: true
+          description: A_S ∈ [0,1], relative prediction accuracy
+        lambda_part:
+          type: string
+          format: decimal
+          nullable: true
+        closing_chips:
+          type: string
+          format: decimal
+          nullable: true
+        gov_tokens_received:
+          type: string
+          format: decimal
+          nullable: true
+        epistemic_score_post:
+          type: string
+          format: decimal
+          nullable: true
+          description: E_S^(t) after settlement update
+
+    PrincipalPower:
+      type: object
+      description: |
+        Staker's AWP Power (veAWP time-weighted voting power) at a specific
+        epoch, aggregated across all chains via api.awp.sh.
+      properties:
+        principal:
+          type: string
+          format: eth-address
+        market_id:
+          type: integer
+          format: int64
+        snapshot_taken_at:
+          type: string
+          format: date-time
+        total_voting_power:
+          type: string
+          description: Σ_chains Σ_tokens voting_power (AWP wei)
+        total_staked:
+          type: string
+          description: Σ_chains Σ_tokens amount_staked (AWP wei). Raw stake, no time weighting.
+        position_count:
+          type: integer
+        chain_count:
+          type: integer
+        per_chain:
+          type: array
+          items:
+            type: object
+            properties:
+              chain_id:
+                type: integer
+                format: int64
+              chain_voting_power:
+                type: string
+                description: Sum on this chain
+              positions:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    token_id:
+                      type: integer
+                      format: int64
+                    amount_staked:
+                      type: string
+                    lock_end_time:
+                      type: integer
+                      format: int64
+                    remaining_seconds:
+                      type: integer
+                      format: int64
+                    voting_power:
+                      type: string
+
+    OrderBookSnapshot:
+      type: object
+      properties:
+        worknet_id:
+          type: integer
+        timestamp:
+          type: string
+          format: date-time
+        bids:
+          type: array
+          items:
+            $ref: '#/components/schemas/PriceLevel'
+        asks:
+          type: array
+          items:
+            $ref: '#/components/schemas/PriceLevel'
+
+    PriceLevel:
+      type: object
+      properties:
+        price:
+          type: string
+          format: decimal
+        total_quantity:
+          type: string
+          format: decimal
+        order_count:
+          type: integer
+
+    KLine:
+      type: object
+      properties:
+        timestamp:
+          type: string
+          format: date-time
+        open:
+          type: string
+          format: decimal
+        high:
+          type: string
+          format: decimal
+        low:
+          type: string
+          format: decimal
+        close:
+          type: string
+          format: decimal
+        volume:
+          type: string
+          format: decimal
+        trade_count:
+          type: integer
+
+    WeeklyReportRequest:
+      type: object
+      required: [worknet_id, content, metrics]
+      properties:
+        worknet_id:
+          type: integer
+        content:
+          type: string
+          maxLength: 50000
+          description: |
+            Markdown-formatted report text (≤ 50_000 characters; DoS
+            guard, not a content-shape constraint).
+        metrics:
+          type: object
+          description: Structured metrics (active miners, tasks completed, etc.)
+        requested_share:
+          type: string
+          format: decimal
+
+    WeeklyReport:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        market_id:
+          type: integer
+        worknet_id:
+          type: integer
+        content:
+          type: string
+        metrics:
+          type: object
+        submitted_at:
+          type: string
+          format: date-time
+
+    CommentRequest:
+      type: object
+      required: [content]
+      properties:
+        worknet_id:
+          type: integer
+          nullable: true
+        content:
+          type: string
+          maxLength: 10000
+
+    Comment:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        author_id:
+          type: string
+        author_epistemic_score:
+          type: string
+          format: decimal
+        worknet_id:
+          type: integer
+          nullable: true
+        content:
+          type: string
+        ai_summary:
+          type: string
+        bridge_score:
+          type: string
+          format: decimal
+        created_at:
+          type: string
+          format: date-time
+
+    LeaderboardEntry:
+      type: object
+      properties:
+        principal:
+          type: string
+        epistemic_score:
+          type: string
+          format: decimal
+        rank:
+          type: integer
+
+    # =========================================================================
+    # ADR-014 schemas — problem+json, pagination, async write receipts
+    # =========================================================================
+
+    Problem:
+      type: object
+      description: |
+        RFC 7807 `application/problem+json` error envelope. Every 4xx response
+        uses this schema. `type` is the canonical problem URL; `code` is the
+        stable machine-readable code from the ADR-006 codebook.
+      required: [type, title, status, code]
+      properties:
+        type:
+          type: string
+          format: uri
+          description: Canonical problem-type URL (stable; safe to dispatch on)
+          example: https://emg.awp.network/problems/insufficient-balance
+        title:
+          type: string
+          description: Human-readable summary; stable across versions
+          example: Insufficient available chips
+        status:
+          type: integer
+          example: 422
+        code:
+          type: string
+          description: Stable machine-readable code (ADR-006 codebook)
+          example: INSUFFICIENT_BALANCE
+        detail:
+          type: string
+          description: Instance-specific detail about this occurrence
+        instance:
+          type: string
+          description: URI reference identifying the specific occurrence
+        request_id:
+          type: string
+          description: Server-assigned request ID for log correlation
+      additionalProperties: true
+
+    Pagination:
+      type: object
+      description: Cursor-based pagination envelope (ADR-014 §4)
+      required: [has_more, limit]
+      properties:
+        next_cursor:
+          type: string
+          nullable: true
+          description: Opaque cursor for next page; null if no more pages
+        has_more:
+          type: boolean
+          description: Whether additional pages exist
+        limit:
+          type: integer
+          description: Page size that was applied (may be capped below requested)
+
+    OrderAcceptedResponse:
+      type: object
+      description: |
+        Response to `POST /v1/orders`. Returned with HTTP `202 Accepted`. Represents
+        a durable acknowledgement that the matcher has persisted the order to WAL
+        (ADR-012). Subsequent fills arrive via WebSocket `fills.me`.
+      required:
+        - order_id
+        - status
+        - initial_fills
+        - remaining_quantity
+        - accepted_at
+      properties:
+        order_id:
+          type: string
+          format: uuid
+        status:
+          type: string
+          enum: [accepted, filled, partially_filled, rejected]
+          description: |
+            Initial status after WAL commit. `filled` / `partially_filled` occur when
+            the incoming order crossed resting liquidity synchronously.
+        initial_fills:
+          type: array
+          description: Fills executed synchronously during intake; may be empty
+          items:
+            $ref: '#/components/schemas/Fill'
+        remaining_quantity:
+          type: string
+          format: decimal
+          description: Quantity remaining in the book after synchronous fills
+        accepted_at:
+          type: string
+          format: date-time
+
+    CancelReceipt:
+      type: object
+      description: |
+        Response to `DELETE /v1/orders/{id}` and each element in
+        `POST /v1/orders/cancel-batch`. Always `200` HTTP status; inspect
+        `status` for actual outcome. See ADR-014 §2.
+      required:
+        - order_id
+        - status
+        - cancelled_quantity
+        - final_filled_quantity
+        - cancel_processed_at
+      properties:
+        order_id:
+          type: string
+          format: uuid
+        status:
+          type: string
+          enum:
+            - cancelled
+            - partially_filled_then_cancelled
+            - already_fully_filled
+            - already_cancelled
+        cancelled_quantity:
+          type: string
+          format: decimal
+          description: Quantity removed from the book by this cancel request
+        final_filled_quantity:
+          type: string
+          format: decimal
+          description: Cumulative fills at the time cancel resolved
+        last_fill_at:
+          type: string
+          format: date-time
+          nullable: true
+        cancel_processed_at:
+          type: string
+          format: date-time
+
+    CancelBatchError:
+      type: object
+      description: |
+        Per-id failure row in the `POST /v1/orders/cancel-batch`
+        results array. Distinct from `CancelReceipt` — the absence
+        of `status` / `cancelled_quantity` / `final_filled_quantity`
+        / `cancel_processed_at` is the structural distinguisher.
+        Clients can detect this shape via the presence of the
+        `code` field, which `CancelReceipt` never carries.
+      required: [order_id, code, detail]
+      properties:
+        order_id:
+          type: string
+          format: uuid
+        code:
+          type: string
+          description: |
+            §9.5.1 codebook entry for the per-id failure. Most common
+            values: `BUSINESS_ORDER_NOT_FOUND`, `BUSINESS_ORDER_NOT_OWNED`.
+        detail:
+          type: string
+          description: Human-readable diagnostic from the error envelope.
