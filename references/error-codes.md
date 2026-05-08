@@ -91,8 +91,9 @@ dispatches on `code` (machine-stable, ADR-006 codebook) and surfaces
 | `BUSINESS_REDUCE_ONLY_WOULD_INCREASE` | Reduce-only order would grow position.                                  |
 | `BUSINESS_VOTE_ALREADY_FINAL`         | Voting window closed.                                                    |
 | `BUSINESS_TRADING_ONLY_PHASE`         | Op valid only outside trading_only.                                     |
+| `BUSINESS_REPORT_ALREADY_SUBMITTED`   | One report per (market, worknet) per epoch — do NOT auto-retry. (Added 2026-05-08; previously overloaded `STATE_IDEMPOTENCY_KEY_MISMATCH`.) |
 
-### State (`STATE_*`) — HTTP 403 / 404 / 409
+### State (`STATE_*`) — HTTP 403 / 404
 
 | Code                                  | Meaning / action                                                        |
 |---------------------------------------|-------------------------------------------------------------------------|
@@ -103,7 +104,18 @@ dispatches on `code` (machine-stable, ADR-006 codebook) and surfaces
 | `STATE_RESULTS_NOT_FOUND`             | Settlement not yet complete. Tell user to retry after settlement.       |
 | `STATE_PRINCIPAL_NOT_IN_EPOCH`        | No AWP Power → no chips. Hint at `awp-skill` for staking.               |
 | `STATE_VOTE_NOT_FOUND`                | Principal didn't submit a vote in this epoch.                           |
-| `STATE_IDEMPOTENCY_KEY_MISMATCH`      | Same idempotency key reused with different body. Generate fresh key.    |
+
+### Idempotency (`IDEMPOTENCY_*`) — HTTP 422 (post-H3, 2026-05-08)
+
+| Code                       | Meaning / action                                                         |
+|----------------------------|--------------------------------------------------------------------------|
+| `IDEMPOTENCY_KEY_REUSE`    | Same `X-Idempotency-Key` reused with different body. Generate fresh key, do NOT auto-retry. Replaces pre-2026-05 `STATE_IDEMPOTENCY_KEY_MISMATCH` (was 409). Wire envelope's `details.previous_hash` is a 64-char SHA-256 hex of the original body. |
+
+> **Migration note**: pre-2026-05-08 servers returned `409 STATE_IDEMPOTENCY_KEY_MISMATCH`
+> for the same condition. Skills running against either generation should
+> dispatch on both code names. The skill's auto-retry policy is identical
+> for both: do nothing, surface to user — repeating the same key with the
+> same wrong body would just hit the cache again.
 
 ### Chain (`CHAIN_*`) — HTTP 502 / 503
 
