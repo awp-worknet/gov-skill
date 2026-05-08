@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""GET /v1/principals/{me}/recipient — 结算时谁实际收到 Gov Tokens。
+"""GET /v1/principals/{me}/recipient — who actually receives Gov Tokens at settlement.
 
     recipient.py [--principal 0x…] [--epoch <id>]
 
-仅在该 epoch 已结算后可用，未结算返回 404。
+Only available after the epoch has settled; un-settled returns 404.
 """
 from __future__ import annotations
 

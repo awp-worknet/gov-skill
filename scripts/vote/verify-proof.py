@@ -1,16 +1,18 @@
 #!/usr/bin/env python3
-"""本地校验 Merkle inclusion proof — 不发请求。
+"""Locally verify a Merkle inclusion proof — sends no request.
 
     verify-proof.py --proof-file proof.json
-    verify-proof.py --epoch 5 --principal 0x… --fetch   # 自动 GET proof
+    verify-proof.py --epoch 5 --principal 0x… --fetch   # auto-GET the proof
 
-逻辑：
-1. 取 leaf_hash + siblings[] + leaf_index。
-2. 自底向上重建路径（按 `leaf_index` 的奇偶决定 sibling 方向）。
-3. 把重建出的 root 与 `merkle_root` 字段比较。
+Logic:
+1. Take leaf_hash + siblings[] + leaf_index.
+2. Rebuild the path bottom-up (the parity of `leaf_index` determines the sibling direction).
+3. Compare the rebuilt root with the `merkle_root` field.
 
-只校验 proof 内部一致性 — 与链上 RootNet 比对需要去链上读 root，本脚本
-不做（用户可以手动用 cast call 或在 govnet-skill 之外用 awp-wallet）。
+Only verifies the proof's internal consistency — comparing against the
+on-chain RootNet requires reading the root from chain, which this script
+does not do (the user can do it manually with cast call or with awp-wallet
+outside of govnet-skill).
 """
 from __future__ import annotations
 
@@ -26,7 +28,7 @@ from lib.govnet_lib import EmgError, emit_error, fetch  # noqa: E402
 
 
 def _b64(s: str) -> bytes:
-    # 服务端 schema 标记 base64 — Python `base64.b64decode` 要求 padding。
+    # The server schema marks this base64 — Python's `base64.b64decode` requires padding.
     pad = "=" * (-len(s) % 4)
     return base64.b64decode(s + pad)
 
@@ -36,7 +38,7 @@ def _verify(leaf: bytes, siblings: list, leaf_index: int) -> bytes:
     idx = leaf_index
     for sib in siblings:
         if idx & 1:
-            # leaf 在右 → sibling 在左
+            # leaf on the right → sibling on the left
             h = hashlib.sha256(_b64(sib) + h).digest()
         else:
             h = hashlib.sha256(h + _b64(sib)).digest()

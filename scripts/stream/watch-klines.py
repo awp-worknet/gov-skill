@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""订阅 klines.{m}.{wn}.{interval} — 实时 OHLCV bucket 更新。
+"""Subscribe to klines.{m}.{wn}.{interval} — live OHLCV bucket updates.
 
     watch-klines.py --market 6 --worknet 11 --interval 1m
     watch-klines.py --channel "klines.6.11.5m"

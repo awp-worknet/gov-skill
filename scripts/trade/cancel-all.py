@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-"""POST /v1/orders/cancel-all — 一键取消所有 active / partially_filled 订单。
+"""POST /v1/orders/cancel-all — single-shot cancel of every active / partially_filled order.
 
     cancel-all.py [--worknet <id>] [--yes]
 
-可选 `--worknet` 限定到单个 worknet。返回 `{ cancelled_count,
-not_cancellable_count, processed_at, partial_error? }`。即使中途某个
-matcher 派发出错，HTTP 也是 200 — 客户端用 `partial_error` 字段判断。
+Optional `--worknet` scopes to a single worknet. Returns `{ cancelled_count,
+not_cancellable_count, processed_at, partial_error? }`. Even if a matcher
+dispatch errors mid-run, HTTP stays at 200 — the client checks the
+`partial_error` field.
 """
 from __future__ import annotations
 

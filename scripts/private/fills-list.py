@@ -1,18 +1,20 @@
 #!/usr/bin/env python3
-"""GET /v1/fills — 自己的成交历史（私有，self-only）。
+"""GET /v1/fills — your own fill history (private, self-only).
 
     fills-list.py [--worknet <id>] [--since <iso>]
                   [--limit 100] [--cursor <opaque>] [--all-pages]
 
-服务端按 X-EMG-Principal 过滤（无 `principal` 查询参数 —— 可见性由签名
-自己锁定）。每条 fill 含价格、数量、role (maker/taker)、市场/worknet。
+The server filters by X-EMG-Principal (no `principal` query parameter —
+visibility is locked to the signature). Each fill includes price, quantity,
+role (maker/taker), market/worknet.
 
-实时 fills 走 WS `fills.me` 频道；本端点用于：
-  - 冷启动 / catch-up
-  - 两次 `fills.me` 订阅之间的 backfill
+Real-time fills go through the WS `fills.me` channel; this endpoint is for:
+  - Cold start / catch-up
+  - Backfilling between two `fills.me` subscriptions
 
-cursor 是不透明的 base64url（服务端编码 `(filled_at, fill_id)` 复合键）；
-客户端把上一页的 `pagination.next_cursor` 原样回传即可。
+The cursor is an opaque base64url (the server encodes a composite
+`(filled_at, fill_id)` key); the client just relays the previous page's
+`pagination.next_cursor` verbatim.
 """
 from __future__ import annotations
 

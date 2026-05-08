@@ -1,10 +1,11 @@
-"""paginate_all — cursor-based 自动翻页 helper。
+"""paginate_all — cursor-based auto-pagination helper.
 
-不实际打 HTTP；用 fake fetch_page 模拟服务端 cursor 行为。重点核对：
-- 单页（next_cursor=None）→ 走一次就停
-- 多页 → cursor 接力到底
-- max_pages 截断 → 加 truncated 标志
-- 服务端略掉 pagination 字段时不崩
+Doesn't actually hit HTTP; uses a fake fetch_page to simulate server cursor
+behavior. Key checks:
+- Single page (next_cursor=None) → run once and stop
+- Multi-page → relay cursor to the end
+- max_pages truncation → add the truncated flag
+- Doesn't crash when the server omits the pagination field
 """
 
 import pytest
@@ -13,7 +14,7 @@ from lib.govnet_lib import paginate_all
 
 
 def _make_pages(*page_data):
-    """构造一连串 fake 响应，最后一页 next_cursor=None。"""
+    """Construct a sequence of fake responses; the last page has next_cursor=None."""
     pages = []
     for i, items in enumerate(page_data):
         is_last = i == len(page_data) - 1
@@ -29,11 +30,11 @@ def _make_pages(*page_data):
 
 
 def _make_fetch(pages):
-    """生成一个能按 cursor 顺序吐出预设页面的 fetch_page。"""
+    """Generate a fetch_page that emits the preset pages in cursor order."""
     state = {"calls": 0, "last_cursor": None}
 
     def fetch_page(params):
-        # 验证 cursor 接力对了
+        # Verify the cursor relay is correct
         if state["calls"] > 0:
             assert params.get("cursor") == f"cursor-{state['calls']}", (
                 f"call {state['calls']}: expected cursor-{state['calls']}, got {params.get('cursor')!r}"
@@ -79,16 +80,16 @@ def test_max_pages_truncation():
     )
     fetch, _ = _make_fetch(pages)
     result = paginate_all(fetch, initial_params={}, max_pages=2)
-    # 取了 2 页就停
+    # Stops after 2 pages
     assert result["page_count"] == 2
     assert result["data"] == [{"id": 1}, {"id": 2}]
     assert result.get("truncated_at_max_pages") is True
-    # 接力 cursor 暴露给调用方
+    # The relay cursor is exposed to the caller
     assert result["next_cursor"] == "cursor-2"
 
 
 def test_empty_data_pages_handled():
-    # 空 data[] 但有更多页（罕见但可能：filtered listing）
+    # Empty data[] but with more pages (rare but possible: filtered listing)
     pages = [
         {"data": [], "pagination": {"next_cursor": "cursor-1", "has_more": True, "limit": 0}},
         {"data": [{"id": 1}], "pagination": {"next_cursor": None, "has_more": False, "limit": 1}},
@@ -105,7 +106,7 @@ def test_empty_data_pages_handled():
 
 
 def test_missing_pagination_field_treated_as_terminal():
-    # 服务端不返回 pagination 字段 → 视为终页
+    # When the server omits the pagination field → treat as the last page
     page = {"data": [{"id": 1}, {"id": 2}]}
     state = {"calls": 0}
 
@@ -119,7 +120,7 @@ def test_missing_pagination_field_treated_as_terminal():
 
 
 def test_initial_params_preserved_across_pages():
-    """除 cursor 外的所有原始参数应当在每页请求里都带上。"""
+    """All original parameters other than cursor should be included on every page request."""
     pages = _make_pages([{"id": 1}], [{"id": 2}])
     seen_params = []
     state = {"calls": 0}
@@ -131,14 +132,14 @@ def test_initial_params_preserved_across_pages():
 
     paginate_all(fetch, initial_params={"status": "active", "worknet_id": 11, "limit": 1})
     assert state["calls"] == 2
-    # 第一次：原始参数
+    # First: original params
     assert seen_params[0] == {"status": "active", "worknet_id": 11, "limit": 1}
-    # 第二次：原始参数 + cursor
+    # Second: original params + cursor
     assert seen_params[1] == {"status": "active", "worknet_id": 11, "limit": 1, "cursor": "cursor-1"}
 
 
 def test_custom_keys():
-    """有些端点可能用 items / next_page_token 而非 data / next_cursor。"""
+    """Some endpoints may use items / next_page_token instead of data / next_cursor."""
     page = {
         "items": [{"x": 1}],
         "paging": {"next_page_token": None},
@@ -160,12 +161,13 @@ def test_custom_keys():
     assert result["page_count"] == 1
 
 
-# --- F1: has_more 是权威停止信号 -------------------------------------------
+# --- F1: has_more is the authoritative stop signal -------------------------------------------
 
 
 def test_has_more_false_stops_even_if_cursor_present():
-    """OpenAPI 规定 has_more 必填、next_cursor 可空 — has_more 是权威信号。
-    如果服务端发 has_more=false 但 cursor 还有值（边界条件），我们应该停。"""
+    """OpenAPI marks has_more required and next_cursor nullable — has_more is the authoritative signal.
+    If the server emits has_more=false while cursor still has a value (a boundary
+    condition), we should stop."""
     pages = [
         {
             "data": [{"id": 1}],
@@ -184,7 +186,7 @@ def test_has_more_false_stops_even_if_cursor_present():
 
 
 def test_has_more_true_but_no_cursor_stops_safely():
-    """has_more=true 但 next_cursor=null — 矛盾输入，无法前进，安全停。"""
+    """has_more=true but next_cursor=null — contradictory input, can't advance, stop safely."""
     page = {
         "data": [{"id": 1}],
         "pagination": {"next_cursor": None, "has_more": True, "limit": 1},
@@ -201,7 +203,7 @@ def test_has_more_true_but_no_cursor_stops_safely():
 
 
 def test_has_more_omitted_falls_back_to_cursor():
-    """服务端不发 has_more 字段时，cursor 是否存在决定是否继续。"""
+    """When the server omits the has_more field, the presence of a cursor decides whether to continue."""
     pages = [
         {"data": [{"id": 1}], "pagination": {"next_cursor": "c1", "limit": 1}},
         {"data": [{"id": 2}], "pagination": {"next_cursor": None, "limit": 1}},

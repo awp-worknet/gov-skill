@@ -1,5 +1,6 @@
-"""EMGVote 三形态开关 — 验证 latest_2026_05 (default) / main_spec / openapi
-都能本地复算摘要，且两两形态摘要不同（type string 真的进了 hashStruct）。
+"""EMGVote three-variant switch — verifies that latest_2026_05 (default) / main_spec / openapi
+each produce a locally recomputable digest, and that any two variants produce different digests
+(the type string really does feed into hashStruct).
 """
 
 import pytest
@@ -39,7 +40,7 @@ def openapi_env(monkeypatch):
     monkeypatch.setenv("GOVNET_VOTE_TYPED_DATA_VARIANT", "openapi")
 
 
-# --- latest_2026_05（当前生产，默认）-----------------------------------------
+# --- latest_2026_05 (current production, default) -----------------------------------------
 
 
 def test_latest_variant_has_six_fields(latest_env):
@@ -86,7 +87,7 @@ def test_unknown_variant_falls_back_to_latest(monkeypatch):
     assert sign_mod._vote_types() is EMG_VOTE_TYPES_LATEST_2026_05
 
 
-# --- main_spec（旧 5 字段） --------------------------------------------------
+# --- main_spec (legacy 5 fields) --------------------------------------------------
 
 
 def test_main_spec_variant_uses_epoch_nonce_camelcase(main_spec_env):
@@ -96,7 +97,7 @@ def test_main_spec_variant_uses_epoch_nonce_camelcase(main_spec_env):
         vote_hash=b"\x11" * 32,
         prediction_hash=b"\x22" * 32,
         vote_revision=1,
-        timestamp=1_775_000_000,  # 旧形态会忽略
+        timestamp=1_775_000_000,  # legacy shape ignores this
         auth_info=AUTH_INFO,
     )
     assert typed["types"]["EMGVote"] == EMG_VOTE_TYPES_MAIN_SPEC["EMGVote"]
@@ -111,22 +112,22 @@ def test_main_spec_variant_uses_epoch_nonce_camelcase(main_spec_env):
 
 
 def test_main_spec_accepts_legacy_kwargs(main_spec_env):
-    """旧调用方传 epoch=/nonce= 应当继续工作。"""
+    """Legacy callers passing epoch=/nonce= should still work."""
     typed = build_emg_vote_typed_data(
         principal="0x" + "42" * 20,
-        market_id=None,  # 显式 None
-        epoch=6,         # 旧 alias
+        market_id=None,  # explicit None
+        epoch=6,         # legacy alias
         vote_hash=b"\x11" * 32,
         prediction_hash=b"\x22" * 32,
         vote_revision=None,
-        nonce=7,         # 旧 alias
+        nonce=7,         # legacy alias
         auth_info=AUTH_INFO,
     )
     assert typed["message"]["epoch"] == "6"
     assert typed["message"]["nonce"] == "7"
 
 
-# --- openapi（旧 4 字段） ----------------------------------------------------
+# --- openapi (legacy 4 fields) ----------------------------------------------------
 
 
 def test_openapi_variant_omits_principal(openapi_env):
@@ -146,11 +147,11 @@ def test_openapi_variant_omits_principal(openapi_env):
     assert msg["nonce"] == "1"
 
 
-# --- 三形态摘要必须两两不同 -------------------------------------------------
+# --- All three variants must produce mutually distinct digests -------------------------------------------------
 
 
 def test_three_variants_produce_three_distinct_digests(monkeypatch):
-    """同样 (market, vote_hash, pred_hash, revision) 在三个形态下摘要必须两两不同。"""
+    """The same (market, vote_hash, pred_hash, revision) under all three shapes must yield mutually distinct digests."""
     args = dict(
         principal="0x" + "42" * 20,
         market_id=6,

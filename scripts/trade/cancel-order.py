@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-"""DELETE /v1/orders/{id} — 取消单个订单。
+"""DELETE /v1/orders/{id} — cancel a single order.
 
-返回值是一份 cancel receipt：
+The response is a cancel receipt:
     status ∈ { cancelled, partially_filled_then_cancelled,
                already_fully_filled, already_cancelled }
 
-也就是说就算订单同时被 fill 了，HTTP 还是 200 — 客户端要看 `status`。
+In other words, even if the order is being filled simultaneously, HTTP stays
+at 200 — the client must check `status`.
 """
 from __future__ import annotations
 

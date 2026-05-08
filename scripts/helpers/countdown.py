@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""距离下一个 phase boundary 还有多久 — 纯本地，不发请求。
+"""Time until the next phase boundary — purely local, sends no request.
 
     countdown.py
     countdown.py --epoch 6
 
-输出：
+Output:
     {
       "epoch_id": 6,
       "phase": "voting_and_trading",
@@ -61,7 +61,7 @@ def main() -> int:
         print(json.dumps({"error": "NEXT_TRANSITION_UNKNOWN", "raw": data}))
         return 1
 
-    # ISO-8601 — Python 3.11+ 自带 fromisoformat 支持 Z
+    # ISO-8601 — Python 3.11+ has fromisoformat with Z support built in
     s = next_at.replace("Z", "+00:00")
     target = datetime.fromisoformat(s).astimezone(timezone.utc)
     now = datetime.now(timezone.utc)

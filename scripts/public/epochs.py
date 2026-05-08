@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""epoch 信息 — current / by-id / phase / results / voters / merkle / proof / history。
+"""epoch info — current / by-id / phase / results / voters / merkle / proof / history.
 
     epochs.py current
     epochs.py get --id 6
@@ -10,8 +10,8 @@
     epochs.py proof --id 5 --principal 0xabc…
     epochs.py history --id 5 --principal 0xabc… [--all-pages]
 
-`voters` 和 `history` 是 cursor-paginated 端点，加 `--all-pages` 自动
-跟着 next_cursor 取完所有页面（默认 max-pages=100 防呆）。
+`voters` and `history` are cursor-paginated endpoints; with `--all-pages` they
+auto-follow next_cursor through every page (default max-pages=100 as a safety cap).
 """
 from __future__ import annotations
 

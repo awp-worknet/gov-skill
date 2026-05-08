@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
-"""把一个 fill / order / settlement payload 美化成人类可读的回执。
+"""Render a fill / order / settlement payload as a human-readable receipt.
 
-    show-receipt.py < fill.json                 # 从 stdin 读
+    show-receipt.py < fill.json                 # read from stdin
     show-receipt.py --type fill --file fill.json
     show-receipt.py --type settlement --file results.json
 
-输入是 JSON（单对象或 `{ items: [...] }`），输出是 stdout 的多行文本。
-保留原始 JSON 也照样输出到 stderr 末尾，方便 agent 解析。
+Input is JSON (a single object or `{ items: [...] }`); output is multi-line
+text on stdout. The raw JSON is still echoed to the tail of stderr to make
+it easy for an agent to parse.
 """
 from __future__ import annotations
 

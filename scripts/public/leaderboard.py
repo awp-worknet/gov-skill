@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
-"""GET /v1/leaderboard/epistemic — 按 epistemic score 排名的 Stakers。
+"""GET /v1/leaderboard/epistemic — Stakers ranked by epistemic score.
 
-    leaderboard.py                     # 当前 epoch 第一页
-    leaderboard.py --epoch 5           # 指定 epoch
+    leaderboard.py                     # current epoch, first page
+    leaderboard.py --epoch 5           # specific epoch
     leaderboard.py --epoch 5 --limit 50
-    leaderboard.py --all-pages         # 自动翻完所有页面
-    leaderboard.py --cursor <opaque>   # 接力上次的 next_cursor
+    leaderboard.py --all-pages         # auto-walk every page
+    leaderboard.py --cursor <opaque>   # relay from a previous next_cursor
 
-`--all-pages` 模式下返回 `{ data: [...合并...], page_count: N }`；超过
-`--max-pages`（默认 100）时加 `truncated_at_max_pages: true` + `next_cursor`
-让调用方自己接力。
+In `--all-pages` mode the response is `{ data: [...merged...], page_count: N }`;
+when `--max-pages` (default 100) is exceeded, `truncated_at_max_pages: true`
+and `next_cursor` are added so the caller can relay.
 """
 from __future__ import annotations
 

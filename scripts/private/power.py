@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""GET /v1/principals/{me}/power — AWP Power 在指定 epoch 的快照。
+"""GET /v1/principals/{me}/power — AWP Power snapshot for the given epoch.
 
     power.py [--principal 0x…] [--epoch <id>]
 
-无 power 时服务端返回 404 — 提示用户先经 awp-skill 质押 veAWP。
+When there is no power, the server returns 404 — prompt the user to first
+stake veAWP via awp-skill.
 """
 from __future__ import annotations
 
@@ -23,7 +24,7 @@ def main() -> int:
     args = ap.parse_args()
     try:
         principal = args.principal or wallet_address()
-        # 该端点在 OpenAPI 里标记 `security: []`（公开读），所以不签名
+        # This endpoint is marked `security: []` in OpenAPI (public read), so no signature
         data = fetch(
             "GET",
             f"/principals/{principal}/power",

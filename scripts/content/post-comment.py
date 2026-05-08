@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""POST /v1/comments — 发表评论。
+"""POST /v1/comments — post a comment.
 
     post-comment.py --content "..." [--worknet <id>] [--idem-key UUID] [--yes]
-    post-comment.py --content-file note.md   # 内容从文件读
+    post-comment.py --content-file note.md   # read content from a file
 
-`--worknet` 可省（论坛级评论）。content 上限 10 000 字符（服务端 enforce）。
+`--worknet` is optional (forum-level comment). content is capped at 10 000
+characters (enforced by the server).
 """
 from __future__ import annotations
 

@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
-"""GET /v1/markets/{m}/worknets/{wn}/klines — OHLCV 历史。
+"""GET /v1/markets/{m}/worknets/{wn}/klines — OHLCV history.
 
     klines.py --market 6 --worknet 11 \
               [--interval 1m|5m|1h|4h|1d] [--from <iso>] [--to <iso>] [--limit 100]
 
-输出是裸数组（与服务端 schema 对齐），每个元素：
+Output is a bare array (matching the server schema); each element:
     { timestamp, open, high, low, close, volume, trade_count }
 
-价格 / 数量按 string-decimal 给出，scale 18 — 调用方自己用 Decimal 解析。
+Prices / quantities are given as string-decimals with scale 18 — callers
+should parse with Decimal themselves.
 """
 from __future__ import annotations
 

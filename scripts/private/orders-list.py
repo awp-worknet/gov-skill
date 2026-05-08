@@ -1,15 +1,16 @@
 #!/usr/bin/env python3
-"""GET /v1/orders — 列出我的订单（cursor 分页）。
+"""GET /v1/orders — list my orders (cursor-paginated).
 
     orders-list.py [--status active|partially_filled|filled|cancelled|expired|rejected]
                    [--worknet <id>] [--epoch <id>]
                    [--limit 100] [--cursor <opaque>] [--all-pages]
 
-服务端按 X-EMG-Principal 过滤。`--principal` 查询参数与 header 不一致
-会被服务端 400（防御性校验）。
+The server filters by X-EMG-Principal. A `--principal` query parameter that
+disagrees with the header gets a 400 from the server (defensive validation).
 
-`--all-pages` 自动跟着 `pagination.next_cursor` 取完所有页面，每翻一
-页就是一次签名（每签名都消费一个 nonce），所以大批量请勿无脑加。
+`--all-pages` auto-follows `pagination.next_cursor` to drain every page; each
+page is one signed request (each signature consumes a nonce), so don't add
+it blindly for huge sets.
 """
 from __future__ import annotations
 

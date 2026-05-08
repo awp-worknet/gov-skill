@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""GET /v1/principals/{me}/managers — 当前授权的 Manager 列表（公开读，OpenAPI security []）。
+"""GET /v1/principals/{me}/managers — list of currently authorized Managers (public read, OpenAPI security []).
 
     managers.py [--principal 0x…]
 """
