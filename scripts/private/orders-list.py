@@ -53,7 +53,7 @@ def main() -> int:
             return signed_request(
                 "GET",
                 sign_path="/orders",
-                full_path="/v1/orders",
+                full_path="/orders",
                 query_params=p,
                 principal=principal,
             )

@@ -26,7 +26,7 @@ def main() -> int:
     args = ap.parse_args()
 
     try:
-        data = fetch("GET", "/v1/worknets")
+        data = fetch("GET", "/worknets")
     except EmgError as e:
         return emit_error(e)
 

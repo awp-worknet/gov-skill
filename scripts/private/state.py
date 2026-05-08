@@ -26,7 +26,7 @@ def main() -> int:
         data = signed_request(
             "GET",
             sign_path=f"/principals/{principal}/state",
-            full_path=f"/v1/principals/{principal}/state",
+            full_path=f"/principals/{principal}/state",
             principal=principal,
         )
     except EmgError as e:

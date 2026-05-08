@@ -72,9 +72,9 @@ def main() -> int:
 
     try:
         if args.epoch is not None:
-            data = fetch("GET", f"/v1/epochs/{args.epoch}/phase")
+            data = fetch("GET", f"/epochs/{args.epoch}/phase")
         else:
-            data = fetch("GET", "/v1/epochs/current")
+            data = fetch("GET", "/epochs/current")
     except EmgError as e:
         return emit_error(e)
 

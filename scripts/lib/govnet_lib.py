@@ -156,9 +156,13 @@ def _request(
 def fetch(method: str, path: str, *, params: Optional[Dict] = None, body: Optional[Any] = None) -> Any:
     """公开读 — 拼 URL + 调用 `_request` + 解析 JSON。
 
-    `path` 必须以 `/` 开头并包含 `/v1` 前缀（外发的真实 URL）。`params`
-    会经规范化后 append 为 query string。`body` 若是 dict 会 JSON 编码。
-    返回解析后的 JSON 或 None（204）。
+    `path` 以 `/` 开头但 **不带 `/v1` 前缀**（API_BASE 已经包含 `/v1`）。
+    例如 `fetch("GET", "/auth/info")` → URL `https://api.gov.works/v1/auth/info`。
+    `params` 会经规范化后 append 为 query string。`body` 若是 dict 会 JSON
+    编码。返回解析后的 JSON 或 None（204）。
+
+    注意：`API_BASE` 默认 `https://api.gov.works/v1`；若 `GOVNET_API_BASE`
+    覆盖成不带 `/v1` 的 URL（自部署 / 反代场景），调用方需要相应调整 path。
     """
     if not path.startswith("/"):
         path = "/" + path
@@ -262,7 +266,7 @@ def get_auth_info(*, force_refresh: bool = False) -> Dict[str, Any]:
             return json.loads(cache.read_text("utf-8"))
         except json.JSONDecodeError:
             pass  # fall through 重新获取
-    info = fetch("GET", "/v1/auth/info")
+    info = fetch("GET", "/auth/info")
     cache.write_text(json.dumps(info), "utf-8")
     return info
 
@@ -279,7 +283,7 @@ def fetch_server_time() -> int:
 
     无 auth，无缓存（每次 fresh）。失败 raise `EmgError`。
     """
-    resp = fetch("GET", "/v1/auth/time")
+    resp = fetch("GET", "/auth/time")
     return int(resp["server_time_unix"])
 
 
@@ -300,9 +304,10 @@ def signed_request(
 ) -> Any:
     """签名 → 发送 → 解析 — 私有读/写的统一入口。
 
-    - `sign_path`：写进 EIP-712 信封 `path` 字段的值（POST-strip 形式）。
-      多数情况就是 `full_path` 去掉 `/v1` 前缀。
-    - `full_path`：实际拼到 `API_BASE` 后面的路径。
+    - `sign_path`：写进 EIP-712 信封 `path` 字段的值（POST-strip 形式，
+      服务端 axum router `nest("/v1", …)` strip 后看到的路径）。
+    - `full_path`：拼到 `API_BASE` 后面的路径，**不带** `/v1` 前缀
+      （API_BASE 已经含 `/v1`）。多数情况下 `full_path == sign_path`。
     - `query_params`：dict；会被 `build_query` 规范化后 append 到 URL，
       同时也作为签名材料里的 `query` 字段。
     - `body`：dict → JSON。`bytes` 直接透传。`None` 表示空 body。
@@ -545,19 +550,20 @@ def emit_error(err: EmgError) -> int:
 
 
 def fetch_market(market_id: int) -> dict:
-    """优先 `/v1/markets/{id}`（含 worknets[]），404 时回落 `/v1/epochs/{id}`。
+    """优先 `/markets/{id}`（含 worknets[]），404 时回落 `/epochs/{id}`。
 
-    OpenAPI 没显式定义 `/v1/markets/{id}`，但 MAIN-SPEC §4.1 + §15 要求；
-    实际服务器是否暴露要看部署。fallback 后的 EpochInfo 没有 worknets[]，
-    脚本里展示的 worknet 名字会退化到 `id N` —— 调用方应 catch 这种情况
-    并按需另调 `/v1/worknets`。
+    `/v1/markets/{id}` 自 2026-05-08 deployment 起在生产已存在（见
+    `docs/SKILL_API_LATEST.md` §1.1）；fallback 路径保留以兼容自部署或
+    回滚到旧版本的环境。fallback 后的 EpochInfo 不含 worknets[]，脚本
+    里展示的 worknet 名字会退化到 `id N` —— 调用方应 catch 这种情况并
+    按需另调 `/worknets`。
     """
     try:
-        return fetch("GET", f"/v1/markets/{market_id}")
+        return fetch("GET", f"/markets/{market_id}")
     except EmgError as e:
         if e.status != 404:
             raise
-    return fetch("GET", f"/v1/epochs/{market_id}")
+    return fetch("GET", f"/epochs/{market_id}")
 
 
 def confirm(prompt: str, *, yes: bool) -> bool:

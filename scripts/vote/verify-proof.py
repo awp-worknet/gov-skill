@@ -59,7 +59,7 @@ def main() -> int:
                 ap.error("--fetch requires --epoch and --principal")
             proof = fetch(
                 "GET",
-                f"/v1/epochs/{args.epoch}/votes/{args.principal}/proof",
+                f"/epochs/{args.epoch}/votes/{args.principal}/proof",
             )
         elif args.proof_file:
             proof = json.loads(Path(args.proof_file).read_text("utf-8"))

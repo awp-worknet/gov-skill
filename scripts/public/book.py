@@ -28,7 +28,7 @@ def main() -> int:
     try:
         data = fetch(
             "GET",
-            f"/v1/markets/{args.market}/worknets/{args.worknet}/book",
+            f"/markets/{args.market}/worknets/{args.worknet}/book",
             params={"depth": args.depth},
         )
     except EmgError as e:

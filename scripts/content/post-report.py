@@ -81,7 +81,7 @@ def main() -> int:
         data = signed_request(
             "POST",
             sign_path="/reports",
-            full_path="/v1/reports",
+            full_path="/reports",
             body=body,
             idempotency_key=args.idem_key,
         )

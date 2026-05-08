@@ -54,7 +54,7 @@ def _parse_vector(s: str) -> List[Decimal]:
 
 
 def _phase_check(market_id: int) -> dict:
-    epoch = fetch("GET", f"/v1/epochs/{market_id}")
+    epoch = fetch("GET", f"/epochs/{market_id}")
     phase = normalize_phase(epoch.get("phase") or epoch.get("status", ""))
     if phase != "voting_and_trading":
         raise EmgError(
@@ -157,7 +157,7 @@ def main() -> int:
         data = signed_request(
             "POST",
             sign_path=f"/epochs/{market_id}/votes",
-            full_path=f"/v1/epochs/{market_id}/votes",
+            full_path=f"/epochs/{market_id}/votes",
             body=body,
             principal=principal,
             idempotency_key=args.idem_key,

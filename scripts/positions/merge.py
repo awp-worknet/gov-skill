@@ -39,7 +39,7 @@ def main() -> int:
         data = signed_request(
             "POST",
             sign_path="/positions/merge",
-            full_path="/v1/positions/merge",
+            full_path="/positions/merge",
             body={"quantity": args.quantity},
             idempotency_key=args.idem_key,
         )

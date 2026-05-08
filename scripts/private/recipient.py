@@ -25,7 +25,7 @@ def main() -> int:
         principal = args.principal or wallet_address()
         data = fetch(
             "GET",
-            f"/v1/principals/{principal}/recipient",
+            f"/principals/{principal}/recipient",
             params={"epoch_id": args.epoch},
         )
     except EmgError as e:

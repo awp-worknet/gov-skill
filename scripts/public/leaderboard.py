@@ -40,12 +40,12 @@ def main() -> int:
     try:
         if args.all_pages:
             data = paginate_all(
-                lambda p: fetch("GET", "/v1/leaderboard/epistemic", params=p),
+                lambda p: fetch("GET", "/leaderboard/epistemic", params=p),
                 initial_params=params,
                 max_pages=args.max_pages,
             )
         else:
-            data = fetch("GET", "/v1/leaderboard/epistemic", params=params)
+            data = fetch("GET", "/leaderboard/epistemic", params=params)
     except EmgError as e:
         return emit_error(e)
     print(json.dumps(data, indent=2))

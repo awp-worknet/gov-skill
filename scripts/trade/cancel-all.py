@@ -35,7 +35,7 @@ def main() -> int:
         data = signed_request(
             "POST",
             sign_path="/orders/cancel-all",
-            full_path="/v1/orders/cancel-all",
+            full_path="/orders/cancel-all",
             query_params=params,
         )
     except EmgError as e:

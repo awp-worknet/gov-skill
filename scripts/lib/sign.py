@@ -268,13 +268,37 @@ def _run_wallet(args, *, stdin: Optional[str] = None) -> str:
 
 
 def wallet_address() -> str:
-    """`awp-wallet receive --json` → 0x-hex 校验和地址。"""
-    out = _run_wallet(["receive", "--json"])
+    """`awp-wallet receive` → 0x-hex 校验和地址。
+
+    多版本兼容：
+    - 优先尝试 `--json` 模式（新版 awp-wallet）。返回的 JSON 字段名可能
+      是 `address` 或 `eoaAddress`，两个都接。
+    - 老版没有 `--json`：回落到无参 `receive`，从 stdout 里 grep 出第一
+      个看起来像 0x-prefixed 40-hex 的 token。
+    """
+    import re
+
+    # 第一次尝试 --json
     try:
-        data = json.loads(out)
-    except json.JSONDecodeError as e:
-        raise WalletError(f"awp-wallet receive --json returned non-JSON: {out!r}") from e
-    return data["address"]
+        out = _run_wallet(["receive", "--json"])
+        try:
+            data = json.loads(out)
+            addr = data.get("address") or data.get("eoaAddress")
+            if addr:
+                return addr
+        except json.JSONDecodeError:
+            pass
+    except WalletError:
+        pass
+
+    # 回落：plain text 模式，正则抽地址
+    out = _run_wallet(["receive"])
+    match = re.search(r"0x[0-9a-fA-F]{40}", out)
+    if match:
+        return match.group(0)
+    raise WalletError(
+        f"could not parse wallet address from `awp-wallet receive` output: {out!r}"
+    )
 
 
 def wallet_sign_typed_data(typed_data: Dict) -> str:

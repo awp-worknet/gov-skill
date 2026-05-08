@@ -23,7 +23,7 @@ from lib.govnet_lib import EmgError, emit_error, fetch, fetch_market, normalize_
 
 def _list_open_markets() -> dict:
     """没有 `/v1/markets` 列表端点时的回落 — 用 `/v1/epochs/current` 给出当前 market。"""
-    cur = fetch("GET", "/v1/epochs/current")
+    cur = fetch("GET", "/epochs/current")
     return {"items": [cur]} if cur else {"items": []}
 
 
@@ -38,7 +38,7 @@ def main() -> int:
             data = fetch_market(args.id)
         else:
             try:
-                data = fetch("GET", "/v1/markets")
+                data = fetch("GET", "/markets")
             except EmgError as e:
                 if e.status == 404:
                     data = _list_open_markets()
