@@ -105,6 +105,7 @@ $ python3 scripts/helpers/what-can-i-do.py
 | Script                                  | Method | Path                                                            | Auth |
 |-----------------------------------------|--------|-----------------------------------------------------------------|------|
 | `public/auth-info.py`                   | GET    | `/v1/auth/info`                                                 | —    |
+| `public/auth-time.py`                   | GET    | `/v1/auth/time` (clock probe + drift check)                      | —    |
 | `public/markets.py`                     | GET    | `/v1/markets`, `/v1/markets/{id}`                               | —    |
 | `public/book.py`                        | GET    | `/v1/markets/{m}/worknets/{wn}/book`                            | —    |
 | `public/klines.py`                      | GET    | `/v1/markets/{m}/worknets/{wn}/klines`                          | —    |
@@ -118,11 +119,14 @@ $ python3 scripts/helpers/what-can-i-do.py
 | `private/recipient.py`                  | GET    | `/v1/principals/{me}/recipient`                                 | sig  |
 | `private/orders-list.py`†               | GET    | `/v1/orders`                                                    | sig  |
 | `private/orders-get.py`                 | GET    | `/v1/orders/{id}`                                               | sig  |
+| `private/fills-list.py`†                | GET    | `/v1/fills` (cursor-paginated, self-only)                        | sig  |
+| `private/votes-mine.py`                 | GET    | `/v1/principals/{me}/votes/{market_id}` (post-reveal only)       | sig  |
 | `trade/submit-order.py`                 | POST   | `/v1/orders`                                                    | sig  |
+| `trade/synthesize.py`                   | POST   | `/v1/orders/synthesize` (Smart Order Router; R8-D)               | sig  |
 | `trade/cancel-order.py`                 | DELETE | `/v1/orders/{id}`                                               | sig  |
 | `trade/cancel-all.py`                   | POST   | `/v1/orders/cancel-all`                                         | sig  |
 | `trade/cancel-batch.py`                 | POST   | `/v1/orders/cancel-batch`                                       | sig  |
-| `vote/submit-vote.py`                   | POST   | `/v1/epochs/{id}/votes`                                         | sig  |
+| `vote/submit-vote.py`                   | POST   | `/v1/epochs/{market_id}/votes`                                   | sig  |
 | `vote/verify-proof.py`                  | local  | (Merkle proof reconstruction)                                    | —    |
 | `positions/split.py`                    | POST   | `/v1/positions/split`                                           | sig  |
 | `positions/merge.py`                    | POST   | `/v1/positions/merge`                                           | sig  |
@@ -234,17 +238,29 @@ retry policy:
 | `AUTH_MISSING_HEADER`                             | Log and abort — skill bug.                                                                          |
 | `AUTH_SIGNATURE_INVALID`                          | Refresh `/v1/auth/info`, retry once. Else surface as a domain-mismatch.                             |
 | `AUTH_NONCE_TOO_LOW` / `NONCE_TOO_LOW`            | `signed_request` auto: refresh auth-info, `bump_to(server_stored)`, retry once.                     |
-| `AUTH_TIMESTAMP_OUT_OF_WINDOW`                    | Print "your clock is X seconds off; sync NTP and retry."                                            |
-| `BUSINESS_PHASE_MISMATCH`                         | Surface phase + countdown to when the op opens again.                                               |
-| `BUSINESS_INSUFFICIENT_BALANCE`                   | Surface `chips_available`.                                                                          |
+| `AUTH_TIMESTAMP_OUT_OF_WINDOW`                    | `signed_request` auto: fetch `/v1/auth/time`, set local clock-offset, retry once. If still skewed, surface "NTP daemon may be stuck". |
+| `AUTH_EIP712_DOMAIN_MISMATCH`                     | `signed_request` auto: force-refresh `/v1/auth/info` (chainId / verifyingContract changed), retry once. |
+| `AUTH_UNAUTHORIZED_DELEGATE`                      | Surface "this manager is not authorized for this principal" (likely stale `awp-skill` config).      |
+| `BUSINESS_PHASE_MISMATCH` / `BUSINESS_TRADING_ONLY_PHASE` | Surface phase + countdown to when the op opens again.                                       |
+| `BUSINESS_INSUFFICIENT_BALANCE`                   | Surface `chips_available`. Do NOT auto-retry.                                                       |
+| `BUSINESS_INSUFFICIENT_SHARES`                    | Surface available shares per worknet. (Triggered by `merge` or sell when out of stock.)             |
+| `BUSINESS_REPORT_ALREADY_SUBMITTED`               | One report per (market, worknet) per epoch — do NOT auto-retry. Show user the existing report id.   |
+| `BUSINESS_VOTE_ALREADY_FINAL`                     | Phase 1 closed; show `phase_closed_at`.                                                              |
+| `BUSINESS_NOT_WORKNET_OPERATOR`                   | Only the worknet's configured operator may submit reports.                                          |
+| `BUSINESS_ORDER_NOT_FOUND` / `BUSINESS_ORDER_NOT_OWNED` | 404 vs 403 — distinguish "doesn't exist" from "exists but yours".                              |
 | `STATE_PRINCIPAL_NOT_IN_EPOCH`                    | Suggest `awp-skill` to stake veAWP for next epoch.                                                  |
-| `RATE_LIMIT_EXCEEDED` / `RATE_LIMIT_BACKPRESSURE` | `signed_request` auto: parse `Retry-After` (delta-seconds OR HTTP-date), sleep ≤ 60s, retry once.   |
+| `STATE_VOTES_NOT_REVEALED`                        | Phase 2→3 boundary hasn't fired; tell user to retry after settlement starts.                        |
 | `STATE_RESULTS_NOT_FOUND`                         | Tell user to retry after settlement window.                                                         |
+| `IDEMPOTENCY_KEY_REUSE` *(post-H3, 422)*          | Same `X-Idempotency-Key` reused with different body. Generate fresh key, do NOT auto-retry. Replaces pre-2026-05 `STATE_IDEMPOTENCY_KEY_MISMATCH` (409). |
+| `RATE_LIMIT_EXCEEDED` / `RATE_LIMIT_BACKPRESSURE` | `signed_request` auto: parse `Retry-After` (delta-seconds OR HTTP-date), sleep ≤ 60s, retry once.   |
+| `VALIDATION_SIMPLEX_CONSTRAINT_VIOLATED` (422)    | Vote vector \|Σ − 1\| > 1e-9 (DB-layer + app-layer check). Re-normalize and retry.                  |
+| `INTERNAL_MATCHER_UNAVAILABLE` (503)              | Per-worknet matcher down; backoff (250ms × 2^attempt, max 5s). Surface congestion if persists > 1m. |
+| `INTERNAL_WAL_DISK_FULL` (503)                    | Operator-paging condition; never auto-retry — surface and bail.                                     |
 | `INTERNAL_*` (5xx) with `X-EMG-Nonce-Burned`      | Bump nonce, surface error to caller (no auto-retry; idempotency unclear).                           |
 | `INSECURE_TRANSPORT` *(client)*                   | Set `GOVNET_API_BASE` / `GOVNET_WS_URL` to `https://` / `wss://`. Skill refuses plaintext.          |
 | `INSECURE_REDIRECT` *(client)*                    | Server returned 30x. Skill refuses to follow (signed headers would leak). Fix DNS / config upstream.|
 
-Full code → message map: `references/error-codes.md` (incl. client-emitted codes section).
+Full code → message map: `references/error-codes.md` (incl. client-emitted codes + post-H3 idempotency section).
 
 ---
 

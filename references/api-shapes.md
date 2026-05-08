@@ -10,6 +10,19 @@ Carry as strings; coerce to `decimal.Decimal` only for arithmetic.
 
 ## Bootstrap
 
+### `GET /v1/auth/time`
+
+Lightweight clock probe (no auth, no caching):
+
+```json
+{ "server_time_unix": 1778000000 }
+```
+
+Use to detect drift before signing — a `>30s` skew will be rejected
+as `AUTH_TIMESTAMP_OUT_OF_WINDOW`. The skill's `signed_request` auto-retries
+that error once with a server-corrected timestamp; manual probe via
+`scripts/public/auth-time.py --check`.
+
 ### `GET /v1/auth/info`
 
 ```json
@@ -141,6 +154,42 @@ Response:
 > **Async write semantics.** Subsequent fills don't appear in the REST
 > response — subscribe to `fills.me` / `orders.me` over WebSocket.
 
+### `POST /v1/orders/synthesize` (signed; 202 Accepted) — Smart Order Router
+
+Acquires `quantity` shares of one target worknet by routing through the
+Smart Order Router (R8-D). The planner picks the cheaper of:
+
+- **Direct**: match the target worknet's ask side
+- **Synthesis**: split 1 chip → N shares, sell each non-target share at
+  best bid, net cost = `1 - Σ best_bid(non-target)`
+
+Request body:
+
+```json
+{
+  "market_id": 6,
+  "worknet_id": 11,
+  "quantity": "100",
+  "max_price": "0.25"
+}
+```
+
+`max_price` is per-share, strictly in `(0, 1)`. The handler multiplies
+by `quantity` to get the planner's total-cost cap; over-budget plans
+return `409 BUSINESS_INSUFFICIENT_BALANCE`.
+
+Response (202 `SynthesizeAcceptedResponse`):
+
+```json
+{
+  "order_id": "018f-…",
+  "status": "accepted",
+  "actual_quantity": "100",
+  "slippage_quantity": "0",
+  "accepted_at": "…"
+}
+```
+
 ### `DELETE /v1/orders/{id}` (signed; 200 with receipt)
 
 ```json
@@ -156,6 +205,37 @@ Response:
 
 `status` values: `cancelled`, `partially_filled_then_cancelled`,
 `already_fully_filled`, `already_cancelled`.
+
+### `GET /v1/fills` (signed; cursor-paginated, self-only)
+
+Lists the authenticated principal's fills, newest-first. **No `principal`
+query parameter** — visibility is locked to the caller. Optional `?worknet_id`
++ `?since=<iso>` filters.
+
+Cursor is opaque base64url (encoding `(filled_at, fill_id)` composite key —
+treat as a black box). Real-time fills land on the WS `fills.me` channel;
+this endpoint is for cold catch-up + backfill between two `fills.me` sessions.
+
+Response uses standard `Pagination`:
+
+```json
+{
+  "data": [
+    {
+      "id": "018f-fill-1",
+      "order_id": "018f-order-7",
+      "market_id": 6,
+      "worknet_id": 11,
+      "side": "buy",
+      "role": "taker",
+      "price": "0.221…",
+      "quantity": "10.0",
+      "filled_at": "2026-05-08T13:00:00Z"
+    }
+  ],
+  "pagination": {"next_cursor": "<opaque>", "has_more": true, "limit": 100}
+}
+```
 
 ### `POST /v1/orders/cancel-batch` — body
 
@@ -194,29 +274,55 @@ Both return the updated `StakerEpochState`:
 
 ## Vote
 
-### `POST /v1/epochs/{id}/votes`
+### `POST /v1/epochs/{market_id}/votes`
+
+Body (the skill emits both `nonce` AND `vote_revision` for forward+back compat
+across the H3 / 2026-05-08 transition):
 
 ```json
 {
   "vote": ["0.5","0.3","0.2","0","0","0","0"],
   "prediction": ["0.5","0.3","0.2","0","0","0","0"],
   "nonce": 1,
+  "vote_revision": 1,
   "signature": "0x<inner EMGVote sig>"
 }
 ```
 
-The outer transport is signed with `EMGRequest`; the inner `signature` field
-is signed with `EMGVote` (different `primaryType`, same domain).
+Vote / prediction tolerance: `|Σ − 1| ≤ 1e-9` (D2 / mig 0047 — DB CHECK
++ application layer both validate). The skill pre-checks client-side
+before spending a nonce.
 
-Response:
+The outer transport is signed with `EMGRequest`; the inner `signature` is
+signed with `EMGVote` typed-data — see `references/signing.md` §5 for the
+6-field shape (post-2026-05-08) and the variant switch.
+
+Response (`VoteReceipt`):
 
 ```json
 {
-  "epoch_id": 6,
+  "market_id": 6,
   "vote_id": "018f-…",
   "leaf_hash": "<base64>",
-  "nonce": 1,
+  "vote_revision": 1,
   "received_at": "…"
+}
+```
+
+### `GET /v1/principals/{me}/votes/{market_id}` (signed; reveal-gated)
+
+Self-only — path principal must equal authenticated principal. Returns the
+caller's `RevealedVote` after the Phase 2→3 boundary has fired (settlement
+started). Pre-reveal returns 403 `STATE_VOTES_NOT_REVEALED`.
+
+```json
+{
+  "principal": "0x…",
+  "market_id": 6,
+  "vote": ["0.5", "0.3", "0.2"],
+  "prediction": ["0.5", "0.3", "0.2"],
+  "vote_revision": 3,
+  "signature": "<base64>"
 }
 ```
 

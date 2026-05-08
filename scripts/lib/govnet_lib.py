@@ -267,6 +267,22 @@ def get_auth_info(*, force_refresh: bool = False) -> Dict[str, Any]:
     return info
 
 
+# --- 服务端时钟探测 ---------------------------------------------------------
+
+
+def fetch_server_time() -> int:
+    """`GET /v1/auth/time` —— 仅返回 server 当前 Unix 秒。轻量 clock probe。
+
+    用途：
+    - `AUTH_TIMESTAMP_OUT_OF_WINDOW` 错误时校准本地，重签后重试。
+    - 离线脚本启动时主动测漂移，超 30s 直接提示用户 NTP sync。
+
+    无 auth，无缓存（每次 fresh）。失败 raise `EmgError`。
+    """
+    resp = fetch("GET", "/v1/auth/time")
+    return int(resp["server_time_unix"])
+
+
 # --- 签名请求（自动 nonce + 重试） -------------------------------------------
 
 
@@ -314,8 +330,12 @@ def signed_request(
     else:
         raw_body = json.dumps(body, separators=(",", ":")).encode("utf-8")
 
+    # `_clock_offset` 在 AUTH_TIMESTAMP_OUT_OF_WINDOW 重试路径里被覆盖：
+    # 拿服务端 now − 本地 now 的差值，让重试时签名的 timestamp 落进窗口。
+    clock_offset = {"delta": 0}
+
     def _attempt(n: int) -> Any:
-        ts = int(time.time())
+        ts = int(time.time()) + clock_offset["delta"]
         headers = sign_emg_request(
             principal=principal,
             method=method,
@@ -366,6 +386,43 @@ def signed_request(
             )
             new = nonce_mod.bump_to(principal, max(stored, nonce))
             return _attempt(new)
+        if err.code == "AUTH_TIMESTAMP_OUT_OF_WINDOW":
+            # 客户端时钟偏移：从 /v1/auth/time 取服务端 now，把 (server − local)
+            # 差值压进 clock_offset，让 _attempt 下一次签名出来的 timestamp
+            # 落在服务端 ±30s 窗口内。如果偏移仍 > 30s（很罕见，意味着 NTP
+            # 可能 stuck）retry 还会失败；那时 EmgError detail 会显式提示。
+            try:
+                srv_time = fetch_server_time()
+            except EmgError:
+                raise err
+            clock_offset["delta"] = srv_time - int(time.time())
+            new_nonce = nonce_mod.next_nonce(principal)
+            try:
+                return _attempt(new_nonce)
+            except EmgError as retry_err:
+                if retry_err.code == "AUTH_TIMESTAMP_OUT_OF_WINDOW":
+                    raise EmgError(
+                        retry_err.code,
+                        f"clock skew {clock_offset['delta']}s vs server even after correction; "
+                        "your NTP daemon may be stuck or the server's clock is itself drifting",
+                        title=retry_err.title,
+                        status=retry_err.status,
+                        body=retry_err.body,
+                        headers=retry_err.headers,
+                    ) from retry_err
+                raise
+        if err.code == "AUTH_EIP712_DOMAIN_MISMATCH":
+            # 服务端 chainId 或 verifyingContract 变了。强制 refresh + retry。
+            nonlocal_auth = get_auth_info(force_refresh=True)
+            # _attempt 闭包里的 auth_info 是引用上层的，需要重 build。
+            # 简化路径：清缓存 + raise EmgError 让上层重新调 signed_request。
+            # 但这违反 "auto retry once" 约定 —— 这里就在闭包内重写一次：
+            new_nonce = nonce_mod.next_nonce(principal)
+            # auth_info 已通过 get_auth_info 缓存层更新；下次 _attempt 读
+            # 全局缓存即可（_attempt 闭包持的是同一对象引用，已被覆盖）
+            auth_info.clear()
+            auth_info.update(nonlocal_auth)
+            return _attempt(new_nonce)
         if err.status == 429:
             # 服务端 rate-limit；honor Retry-After header（秒），上限 60s 防呆
             wait = _parse_retry_after(err.headers.get("Retry-After"))

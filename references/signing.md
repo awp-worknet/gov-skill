@@ -159,7 +159,7 @@ DELETE /v1/orders/018f-aa…
 - HTTP returns 200 with a `CancelReceipt` even on no-op cases — inspect
   `status` (`cancelled`, `partially_filled_then_cancelled`, etc.).
 
-### 5. Vote — outer EMGRequest + inner EMGVote
+### 5. Vote — outer EMGRequest + inner EMGVote (latest_2026_05)
 
 ```
 POST /v1/epochs/6/votes
@@ -168,42 +168,47 @@ POST /v1/epochs/6/votes
   "vote": ["0.5","0.3","0.2","0","0","0","0"],
   "prediction": ["0.5","0.3","0.2","0","0","0","0"],
   "nonce": 1,
+  "vote_revision": 1,
   "signature": "0x<inner EMGVote sig>"
 }
 ```
 
-- Outer `EMGRequest`:
-  - `path` = `"/epochs/6/votes"`
+- Outer `EMGRequest` envelope:
+  - `path` = `"/epochs/6/votes"` (POST-strip)
   - `bodyHash` = `keccak256(<the JSON above>)`
-- Inner `EMGVote` typed data, primaryType `EMGVote`:
-  - `principal`     = wallet address
-  - `epoch`         = 6
-  - `voteHash`      = `keccak256(canonical_bytes(vote))`
-  - `predictionHash`= `keccak256(canonical_bytes(prediction))`
-  - `nonce`         = 1 (vote-level, NOT the EMG-SIG-V1 nonce)
+- Inner `EMGVote` typed data (post-2026-05-08 deployment, 6 fields):
+  - `principal`        = wallet address (20 bytes)
+  - `market_id`        = 6 (uint64)
+  - `vote_revision`    = 1 (uint64; per-(principal, market) strictly ascending)
+  - `vote_hash`        = `keccak256(canonical_bytes(vote))`
+  - `prediction_hash`  = `keccak256(canonical_bytes(prediction))` or `0x00…00` if empty
+  - `timestamp`        = `int(time.time())` (uint256, Unix seconds UTC)
+
+The body still carries `nonce` (legacy field name in OpenAPI) AND `vote_revision`
+(new authoritative name) — the skill emits both for forward + backward compat.
+The wire conflict (OpenAPI 4-field vs LATEST 6-field) was resolved by the
+2026-05-08 deployment in favor of LATEST; older specs lag.
 
 `canonical_bytes(vec)` is implemented in `scripts/lib/canonical.py` as
 `canonical_decimal_vector(vec)` — `4-byte LE u32 length || N × rust_decimal_serialize(d)`.
-The 16-byte `rust_decimal_serialize` layout
-`(lo: u32 | mid: u32 | hi: u32 | flags: u32, all little-endian, flags bits
-16..23 = scale, bit 31 = sign)` is pinned in
-`tests/test_rust_decimal.py` with 10 known-answer vectors.
+The 16-byte `rust_decimal_serialize` layout (verified against actual rust_decimal):
+`flags (u32 LE, bits 16..23 = scale, bit 31 = sign) | lo | mid | hi`. Pinned in
+`tests/test_rust_decimal.py::RUST_REFERENCE_BYTES` against 12 KAT vectors
+including the 5 upstream-pinned fixtures (0, 1, 0.5, 0.25, 0.123456789012345).
 
-### EMGVote shape — spec conflict
+### EMGVote shape switch — `GOVNET_VOTE_TYPED_DATA_VARIANT`
 
-MAIN-SPEC §3 declares EMGVote as 5 fields with `principal address` plus
-`epoch / nonce: uint256`. OpenAPI `SignedVoteRequest.signature` description
-declares 4 fields without `principal`, with `epoch / nonce: uint64`. Until
-the server's actual ABI is verified, the skill ships both forms behind
-`GOVNET_VOTE_TYPED_DATA_VARIANT` — default `main_spec`, set to `openapi`
-to switch:
+The skill supports three forms behind one env var, default = current production:
 
-```
-GOVNET_VOTE_TYPED_DATA_VARIANT=openapi python3 scripts/vote/submit-vote.py …
-```
+| Variant            | Env value         | Fields                                                                    | When server uses it                          |
+|--------------------|-------------------|---------------------------------------------------------------------------|----------------------------------------------|
+| `latest_2026_05` ★ | (default / unset) | principal · market_id · vote_revision · vote_hash · prediction_hash · timestamp | post-2026-05-08 production (current)         |
+| `main_spec`        | `main_spec`       | principal · epoch · voteHash · predictionHash · nonce                     | pre-2026-05 deployment per old MAIN-SPEC     |
+| `openapi`          | `openapi`         | epoch · voteHash · predictionHash · nonce (no principal)                  | OpenAPI yaml description (was never deployed)|
 
-`tests/test_vote_variants.py` proves the two variants produce different
-EIP-712 digests (so the switch actually changes signing material).
+Switch with `GOVNET_VOTE_TYPED_DATA_VARIANT=main_spec python3 scripts/vote/submit-vote.py …`.
+`tests/test_vote_variants.py` pins all three forms produce three distinct
+digests (so the switch actually changes signing material end-to-end).
 
 ---
 

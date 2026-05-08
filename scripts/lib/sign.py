@@ -11,15 +11,19 @@
 不会接触私钥，纯粹用于交叉验证 typed data 构造。
 
 # EMGVote 形态开关
-spec 内部冲突未消除前需要双形态支持：
-- `main_spec`（默认）：5 字段含 principal，epoch/nonce 用 uint256
-  （MAIN-SPEC §3 + worked example §15）
-- `openapi`：4 字段不含 principal，epoch/nonce 用 uint64
-  （02-openapi.yaml 的 SignedVoteRequest.signature 描述）
 
-调用方可通过环境变量 `GOVNET_VOTE_TYPED_DATA_VARIANT=openapi` 切换。生
-产部署前必须与服务端 `crates/emg-auth/` 实际定义对齐 — 形态错了 vote
-会被 ecrecover 拒掉。
+服务端 EMGVote 实际形态在 2026-05-08 deployment 后变了（见
+`docs/SKILL_API_LATEST.md` §2.3）。`docs/openapi.yaml` 还没跟上。
+所以本模块同时支持三种形态：
+
+- `latest_2026_05`（默认）：6 字段，含 `principal/market_id/vote_revision/
+  vote_hash/prediction_hash/timestamp`，snake_case，对应**当前生产服务器**。
+- `main_spec`：5 字段（principal/epoch/voteHash/predictionHash/nonce, uint256），
+  对应旧 `01-MAIN-SPEC.md` §3。
+- `openapi`：4 字段（无 principal，epoch/nonce uint64，camelCase），对应
+  `02-openapi.yaml` 的 SignedVoteRequest.signature 描述（已被 LATEST 覆盖）。
+
+`GOVNET_VOTE_TYPED_DATA_VARIANT` 环境变量切换。生产应当用默认。
 """
 
 from __future__ import annotations
@@ -53,7 +57,21 @@ EMG_REQUEST_TYPES = {
 }
 
 # 投票内层 typed data — primaryType 不同，domain 相同。
-# 两个变体见模块 docstring 的 "EMGVote 形态开关"。
+# 三个变体见模块 docstring 的 "EMGVote 形态开关"。
+
+# 当前生产形态（2026-05-08 deployment 起，见 SKILL_API_LATEST.md §2.3）。
+EMG_VOTE_TYPES_LATEST_2026_05 = {
+    "EIP712Domain": EMG_REQUEST_TYPES["EIP712Domain"],
+    "EMGVote": [
+        {"name": "principal", "type": "address"},
+        {"name": "market_id", "type": "uint64"},
+        {"name": "vote_revision", "type": "uint64"},
+        {"name": "vote_hash", "type": "bytes32"},
+        {"name": "prediction_hash", "type": "bytes32"},
+        {"name": "timestamp", "type": "uint256"},
+    ],
+}
+
 EMG_VOTE_TYPES_MAIN_SPEC = {
     "EIP712Domain": EMG_REQUEST_TYPES["EIP712Domain"],
     "EMGVote": [
@@ -77,17 +95,20 @@ EMG_VOTE_TYPES_OPENAPI = {
 
 
 def _vote_variant() -> str:
-    return os.environ.get("GOVNET_VOTE_TYPED_DATA_VARIANT", "main_spec").lower()
+    return os.environ.get("GOVNET_VOTE_TYPED_DATA_VARIANT", "latest_2026_05").lower()
 
 
 def _vote_types() -> Dict:
-    if _vote_variant() == "openapi":
+    v = _vote_variant()
+    if v == "openapi":
         return EMG_VOTE_TYPES_OPENAPI
-    return EMG_VOTE_TYPES_MAIN_SPEC
+    if v == "main_spec":
+        return EMG_VOTE_TYPES_MAIN_SPEC
+    return EMG_VOTE_TYPES_LATEST_2026_05
 
 
 # 旧名兼容 — 早期代码 import 这个，后续改成调 `_vote_types()`。
-EMG_VOTE_TYPES = EMG_VOTE_TYPES_MAIN_SPEC
+EMG_VOTE_TYPES = EMG_VOTE_TYPES_LATEST_2026_05
 
 
 def _domain(auth_info: Dict) -> Dict:
@@ -146,29 +167,67 @@ def build_emg_request_typed_data(
 def build_emg_vote_typed_data(
     *,
     principal: str,
-    epoch: int,
+    market_id: int,
     vote_hash: bytes,
     prediction_hash: bytes,
-    nonce: int,
     auth_info: Dict,
+    vote_revision: Optional[int] = None,
+    timestamp: Optional[int] = None,
+    # 旧形态兼容参数
+    epoch: Optional[int] = None,
+    nonce: Optional[int] = None,
 ) -> Dict:
     """构造投票内层 EMGVote typed data。
 
-    投票需要两个签名：外层 EMGRequest 走标准 transport，内层 EMGVote
-    绑定 (epoch, voteHash, predictionHash, nonce) 一起放进 POST body。
+    投票需要两个签名：外层 EMGRequest 走标准 transport，内层 EMGVote 包含
+    投票完整性绑定，其签名进 POST body 的 `signature` 字段。
 
-    形态由 `GOVNET_VOTE_TYPED_DATA_VARIANT` 环境变量决定（见模块 docstring）。
-    `principal` 字段在 `openapi` 形态下被静默丢弃。
+    形态由 `GOVNET_VOTE_TYPED_DATA_VARIANT` 决定（见模块 docstring）：
+      - `latest_2026_05`（默认 / 当前生产）：用 market_id + vote_revision +
+        timestamp，必传 `vote_revision` + `timestamp`，`epoch`/`nonce` 被忽略。
+      - `main_spec`：5 字段，把 market_id 当 epoch、把 vote_revision 当 nonce
+        发出；`timestamp` 被忽略；如果调用方只传了 epoch/nonce 也接受。
+      - `openapi`：4 字段，同 main_spec 但不带 principal。
+
+    所有形态都接受 `market_id` 作为 epoch/market 的统一名字 — 旧 `epoch=`
+    参数仍然可用，作为向后兼容入口。
     """
     types = _vote_types()
-    message: Dict[str, str] = {
-        "epoch": str(int(epoch)),
-        "voteHash": "0x" + vote_hash.hex(),
-        "predictionHash": "0x" + prediction_hash.hex(),
-        "nonce": str(int(nonce)),
-    }
-    if "principal" in {f["name"] for f in types["EMGVote"]}:
+    field_names = {f["name"] for f in types["EMGVote"]}
+
+    # 统一映射：epoch / market_id 二选一
+    market = market_id if market_id is not None else epoch
+    if market is None:
+        raise ValueError("must pass market_id (or legacy epoch=)")
+    # vote_revision / nonce 二选一
+    revision = vote_revision if vote_revision is not None else nonce
+    if revision is None:
+        raise ValueError("must pass vote_revision (or legacy nonce=)")
+
+    message: Dict[str, str] = {}
+    if "principal" in field_names:
         message["principal"] = principal
+    if "market_id" in field_names:
+        message["market_id"] = str(int(market))
+    if "epoch" in field_names:
+        message["epoch"] = str(int(market))
+    if "vote_revision" in field_names:
+        message["vote_revision"] = str(int(revision))
+    if "nonce" in field_names:
+        message["nonce"] = str(int(revision))
+    if "vote_hash" in field_names:
+        message["vote_hash"] = "0x" + vote_hash.hex()
+    if "voteHash" in field_names:
+        message["voteHash"] = "0x" + vote_hash.hex()
+    if "prediction_hash" in field_names:
+        message["prediction_hash"] = "0x" + prediction_hash.hex()
+    if "predictionHash" in field_names:
+        message["predictionHash"] = "0x" + prediction_hash.hex()
+    if "timestamp" in field_names:
+        if timestamp is None:
+            raise ValueError("latest_2026_05 EMGVote requires timestamp")
+        message["timestamp"] = str(int(timestamp))
+
     return {
         "domain": _domain(auth_info),
         "primaryType": "EMGVote",
@@ -275,18 +334,29 @@ def sign_emg_request(
 def sign_emg_vote(
     *,
     principal: str,
-    epoch: int,
+    market_id: int,
     vote_hash: bytes,
     prediction_hash: bytes,
-    nonce: int,
     auth_info: Dict,
+    vote_revision: Optional[int] = None,
+    timestamp: Optional[int] = None,
+    epoch: Optional[int] = None,
+    nonce: Optional[int] = None,
 ) -> str:
-    """投票内层签名 — 返回 65 字节 0x-hex。POST body 里把它放在 `signature` 字段。"""
+    """投票内层签名 — 返回 65 字节 0x-hex。POST body 里放在 `signature` 字段。
+
+    `latest_2026_05` 形态（默认）需要 `vote_revision` + `timestamp`；旧形态
+    `main_spec` / `openapi` 把 vote_revision 当作 nonce 使用，`timestamp` 被
+    忽略。`epoch` 是 `market_id` 的旧别名，仅做向后兼容入参。
+    """
     typed_data = build_emg_vote_typed_data(
         principal=principal,
-        epoch=epoch,
+        market_id=market_id,
         vote_hash=vote_hash,
         prediction_hash=prediction_hash,
+        vote_revision=vote_revision,
+        timestamp=timestamp,
+        epoch=epoch,
         nonce=nonce,
         auth_info=auth_info,
     )
