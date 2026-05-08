@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-"""POST /v1/orders/cancel-batch — 一次取消最多 500 个订单。
+"""POST /v1/orders/cancel-batch — cancel up to 500 orders in one call.
 
     cancel-batch.py --ids 018f-aa,018f-bb,018f-cc [--yes]
-    cancel-batch.py --ids-file orders.txt   # 一行一个 UUID
+    cancel-batch.py --ids-file orders.txt   # one UUID per line
 
-返回 `{ results: [...] }`，每个元素要么是 `CancelReceipt`（成功），要么
-是 `CancelBatchError {order_id, code, detail}` — 用 `code` 字段区分。
+Returns `{ results: [...] }`; each element is either a `CancelReceipt`
+(success) or a `CancelBatchError {order_id, code, detail}` — distinguish by
+the `code` field.
 """
 from __future__ import annotations
 

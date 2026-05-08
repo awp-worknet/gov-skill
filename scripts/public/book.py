@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""GET /v1/markets/{m}/worknets/{wn}/book — 订单簿 snapshot。
+"""GET /v1/markets/{m}/worknets/{wn}/book — order book snapshot.
 
     book.py --market 6 --worknet 11 [--depth 20]
 
-输出按服务端原样转发：`{ market_id, worknet_id, timestamp, bids[], asks[] }`
-其中每个 level 是 `{ price, total_quantity }`。
+Output is forwarded verbatim from the server: `{ market_id, worknet_id, timestamp, bids[], asks[] }`
+where each level is `{ price, total_quantity }`.
 
-实时变化请用 `stream/watch-book.py` 订阅 `book.{m}.{wn}` 频道。
+For live updates, use `stream/watch-book.py` to subscribe to the `book.{m}.{wn}` channel.
 """
 from __future__ import annotations
 

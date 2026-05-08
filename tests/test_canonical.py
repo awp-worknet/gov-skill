@@ -1,7 +1,8 @@
-"""查询规范化 — 已知答案向量从 crates/emg-auth/src/canonical.rs::tests 移植。
+"""Query canonicalization — known-answer vectors ported from crates/emg-auth/src/canonical.rs::tests.
 
-任何漂移都会让 EIP-712 摘要与服务端不一致，所以这些测试 **必须** 始终
-通过。失败 ≡ 客户端会被服务端 401 拒绝。
+Any drift would make the EIP-712 digest disagree with the server, so these
+tests **must** always pass. A failure here is equivalent to the client being
+rejected with 401 by the server.
 """
 
 import pytest
@@ -76,7 +77,7 @@ def test_duplicate_keys_sorted_by_value():
 
 
 def test_spec_example_input_canonicalizes_correctly():
-    # spec §9.3.4 example input — 与 Rust 测试同名，固定 ascending lex 排序
+    # spec §9.3.4 example input — matches the Rust test name; fixed ascending lex order
     assert canonicalize_query("?epoch=5&principal=0xabc") == "epoch=5&principal=0xabc"
 
 
@@ -84,7 +85,7 @@ def test_spec_example_input_canonicalizes_correctly():
 
 
 def test_uppercase_percent_decodes_to_unreserved():
-    # %41 == 'A' (unreserved) → 还原成裸 A
+    # %41 == 'A' (unreserved) → restored to bare A
     assert canonicalize_query("?a=%41") == "a=A"
 
 
@@ -98,7 +99,7 @@ def test_space_encodes_as_percent_20():
 
 
 def test_plus_is_literal_not_space():
-    # 不套用 form-urlencoded 的 + 即空格语义
+    # Do not apply form-urlencoded "+ means space" semantics
     assert canonicalize_query("?a=%2b") == "a=%2b"
     assert canonicalize_query("?a=+") == "a=%2b"
 

@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-"""GET /v1/auth/info — 引导 EIP-712 domain（chainId + verifyingContract）。
+"""GET /v1/auth/info — bootstrap the EIP-712 domain (chainId + verifyingContract).
 
-skill 启动时第一个调用的脚本。结果会被 `govnet_lib.get_auth_info()` 缓存
-到 `~/.govnet/auth-info.json`，后续签名直接读缓存。
+The first script the skill calls on startup. The result is cached by
+`govnet_lib.get_auth_info()` to `~/.govnet/auth-info.json`; subsequent
+signatures read from the cache directly.
 
-用法：
-    auth-info.py [--refresh]   # --refresh 强制绕过本地缓存
+Usage:
+    auth-info.py [--refresh]   # --refresh forces bypassing the local cache
 """
 from __future__ import annotations
 

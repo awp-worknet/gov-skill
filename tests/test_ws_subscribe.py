@@ -1,4 +1,4 @@
-"""WSClient.subscribe 的 failed[] 检查 — 不实际打开 socket，monkeypatch _call。"""
+"""Tests for WSClient.subscribe's failed[] handling — does not actually open a socket; monkeypatches _call."""
 
 import asyncio
 
@@ -8,10 +8,10 @@ from lib.ws import WSClient, WSError
 
 
 class _StubClient(WSClient):
-    """只覆盖 `_call`，跳过真实 WebSocket。"""
+    """Overrides only `_call`, bypassing the real WebSocket."""
 
     def __init__(self, response):
-        # 不调 super().__init__ 避免触发 _enforce_wss
+        # Skip super().__init__ to avoid triggering _enforce_wss
         self._response = response
         self._closed = False
         self._next_id = 1
@@ -71,13 +71,13 @@ def test_subscribe_allow_partial_returns_failed_inline():
         return await stub.subscribe(["book.6.11", "klines.x"], allow_partial=True)
 
     result = _run(go())
-    # 不抛 — 调用方自己看 failed
+    # No raise — the caller inspects failed itself
     assert result["failed"][0]["error"]["code"] == "CHANNEL_INVALID_FIELD"
     assert result["subscribed"] == ["book.6.11"]
 
 
 def test_subscribe_handles_missing_failed_field():
-    # 服务端可能省略 failed: [] 字段
+    # The server may omit the failed: [] field
     stub = _StubClient({"subscribed": ["phase"]})
 
     async def go():

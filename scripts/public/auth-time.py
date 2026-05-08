@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
-"""GET /v1/auth/time — 轻量服务端时钟探测。
+"""GET /v1/auth/time — lightweight server clock probe.
 
-    auth-time.py            # 打印服务端 Unix 秒
-    auth-time.py --check    # 顺便算本地漂移并退出非零（>30s 时）
+    auth-time.py            # print server Unix seconds
+    auth-time.py --check    # also compute local drift and exit non-zero (when > 30s)
 
-签名时 server 校验 |now - signed_timestamp| ≤ 30s（spec §9.3.4）。本地
-NTP 失准会一直被 `AUTH_TIMESTAMP_OUT_OF_WINDOW` 拒，但报错信息看不出
-是客户端的问题还是服务端的问题。先跑一下这个，就能直观对比。
+When signing, the server validates |now - signed_timestamp| ≤ 30s (spec §9.3.4).
+A locally desynced NTP gets you persistently rejected with
+`AUTH_TIMESTAMP_OUT_OF_WINDOW`, but the error message can't tell you whether
+the issue is client-side or server-side. Run this first for a direct
+comparison.
 """
 from __future__ import annotations
 
@@ -40,7 +42,7 @@ def main() -> int:
     print(json.dumps(out, indent=2))
     if args.check and abs(drift) > 30:
         sys.stderr.write(
-            f"⚠️  Local clock is {drift:+d}s off from server. "
+            f"WARNING: Local clock is {drift:+d}s off from server. "
             "Run NTP sync (e.g. `sudo systemctl restart systemd-timesyncd`) "
             "before signing — your requests will be rejected with "
             "AUTH_TIMESTAMP_OUT_OF_WINDOW.\n"

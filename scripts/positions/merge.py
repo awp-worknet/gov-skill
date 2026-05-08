@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-"""POST /v1/positions/merge — 把 N 份 shares 合并回 chips。
+"""POST /v1/positions/merge — merge N shares back into chips.
 
     merge.py --market 6 --quantity 5 [--idem-key UUID] [--yes]
 
-需要每个 worknet 都至少持有 `quantity` 份 shares — 否则服务端返回
-`BUSINESS_INSUFFICIENT_SHARES`（HTTP 409）。
+Requires holding at least `quantity` shares of each worknet — otherwise the
+server returns `BUSINESS_INSUFFICIENT_SHARES` (HTTP 409).
 
-`market_id` 是 per-market 操作；OpenAPI 没把它标 required，但服务端实际
-验证（与 submit-order / split 一致的 spec-lag 模式）。
+`market_id` is per-market; OpenAPI does not mark it required, but the server
+actually validates it (same spec-lag pattern as submit-order / split).
 """
 from __future__ import annotations
 

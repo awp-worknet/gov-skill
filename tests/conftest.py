@@ -1,4 +1,4 @@
-"""把 scripts/lib 加到 sys.path，让 `from lib.canonical import ...` 直接可用。"""
+"""Add scripts/lib to sys.path so `from lib.canonical import ...` works directly."""
 import sys
 from pathlib import Path
 

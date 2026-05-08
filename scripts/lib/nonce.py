@@ -1,21 +1,25 @@
-"""Per-Principal nonce floor — 进程间原子分配。
+"""Per-Principal nonce floor — atomic allocation across processes.
 
-每次签名都要把 EIP-712 信封里的 `nonce` 字段设为严格大于服务端 stored 值
-的整数。我们在 `~/.govnet/nonces/<principal>.json` 维护本地下界，保证两
-个并发的 skill 调用不会复用同一个 nonce：
+Every signature must set the `nonce` field of the EIP-712 envelope to an
+integer strictly greater than the value the server has stored. We maintain a
+local floor in `~/.govnet/nonces/<principal>.json` to ensure two concurrent
+skill invocations don't reuse the same nonce:
 
-- 创建/自增：用一个 sibling lock 文件 (`<principal>.lock`) + `fcntl.flock`
-  做进程间互斥锁；锁内做 read-modify-write，然后用 `os.replace` 原子覆盖
-  数据文件。两个并发 skill 进程 **不会** 拿到同一个 nonce —— 后到的会
-  block 直到先到的写完。
-- `fsync` 确保 crash 时不会留下半写状态。
-- 与服务端漂移：`AUTH_NONCE_TOO_LOW` / `NONCE_TOO_LOW` 时调用方应
-  re-fetch `/v1/auth/info` 拿到 server stored，调用 `bump_to(value)` 把
-  本地下界推上去再重试 —— `bump_to` 同样走 flock 路径。
-- Windows: `fcntl` 不可用 —— 占位实现回落到无锁，旧的"两个进程同 nonce"
-  风险仍在。生产部署应在 Linux/macOS 上跑。
+- Create / increment: a sibling lock file (`<principal>.lock`) plus
+  `fcntl.flock` provides cross-process mutual exclusion; the read-modify-write
+  happens inside the lock, then `os.replace` atomically overwrites the data
+  file. Two concurrent skill processes **will not** receive the same nonce —
+  the later one blocks until the earlier one finishes.
+- `fsync` ensures we never leave a half-written state on crash.
+- Server drift: on `AUTH_NONCE_TOO_LOW` / `NONCE_TOO_LOW`, the caller should
+  re-fetch `/v1/auth/info` for the server-stored value, then call
+  `bump_to(value)` to push the local floor up before retrying — `bump_to`
+  also takes the flock path.
+- Windows: `fcntl` is not available — the placeholder implementation falls
+  back to lock-free, leaving the old "two processes share a nonce" risk in
+  place. Production deployments should run on Linux/macOS.
 
-`GOVNET_NONCE_DIR` 可覆盖默认 `~/.govnet/nonces/`。
+`GOVNET_NONCE_DIR` overrides the default `~/.govnet/nonces/`.
 """
 
 from __future__ import annotations
@@ -29,7 +33,7 @@ from pathlib import Path
 from typing import Iterator, Optional
 
 try:
-    import fcntl  # POSIX-only — Windows 拿不到此模块
+    import fcntl  # POSIX-only — not available on Windows
     _HAS_FCNTL = True
 except ImportError:  # pragma: no cover
     _HAS_FCNTL = False
@@ -46,7 +50,7 @@ def _nonce_dir() -> Path:
 
 
 def _nonce_path(principal: str) -> Path:
-    # 全部小写 — 同一个地址的不同大小写形式应该共享同一个 nonce floor。
+    # Always lowercase — different case forms of the same address should share a single nonce floor.
     return _nonce_dir() / f"{principal.lower()}.json"
 
 
@@ -55,10 +59,11 @@ def _now_iso() -> str:
 
 
 def _atomic_write(path: Path, payload: dict) -> None:
-    """通过 `os.replace` 写入 — 同 mount point 下的 rename 是原子的。
+    """Write via `os.replace` — rename within the same mount point is atomic.
 
-    任何异常路径（write/fsync/replace 失败）都清理临时文件，避免磁盘满
-    或 nonce 目录被 mount 错时堆 orphan tmp。
+    Any failing path (write/fsync/replace failure) cleans up the temp file,
+    preventing orphan tmp accumulation when the disk is full or the nonce
+    directory is mounted incorrectly.
     """
     tmp = path.with_suffix(path.suffix + f".tmp.{os.getpid()}.{time.time_ns()}")
     data = json.dumps(payload).encode("utf-8")
@@ -80,10 +85,11 @@ def _atomic_write(path: Path, payload: dict) -> None:
 
 @contextlib.contextmanager
 def _principal_lock(principal: str) -> Iterator[None]:
-    """跨进程互斥 — 进入时 LOCK_EX，退出时自动释放。
+    """Cross-process mutex — acquires LOCK_EX on entry, releases on exit.
 
-    用 sibling `<principal>.lock` 文件（不是数据文件本身），避免 `os.replace`
-    覆盖时把 inode 换掉导致锁丢失。Windows 没 fcntl 时降级为无锁。
+    Uses a sibling `<principal>.lock` file (rather than the data file itself)
+    to avoid losing the lock when `os.replace` swaps inodes. On Windows
+    without fcntl, this degrades to lock-free.
     """
     if not _HAS_FCNTL:
         yield
@@ -101,10 +107,11 @@ def _principal_lock(principal: str) -> Iterator[None]:
 
 
 def read_floor(principal: str) -> int:
-    """返回本地存储的 nonce 下界。文件不存在时返回 0（首次签名用 1）。
+    """Return the locally stored nonce floor. Returns 0 if the file is missing (so first signature uses 1).
 
-    不持锁 —— 调用方需要自己保证读后没有其它进程改写。`next_nonce` /
-    `bump_to` 在持锁状态下调用本函数。
+    Does not hold the lock — callers must ensure no other process writes
+    between read and use. `next_nonce` / `bump_to` call this while holding
+    the lock.
     """
     path = _nonce_path(principal)
     if not path.exists():
@@ -113,16 +120,18 @@ def read_floor(principal: str) -> int:
         with path.open("r", encoding="utf-8") as f:
             return int(json.load(f)["nonce"])
     except (json.JSONDecodeError, KeyError, ValueError):
-        # 文件被腐蚀 — 抹掉重来比静默忽略安全。
+        # File is corrupted — wiping and starting over is safer than silently ignoring.
         return 0
 
 
 def next_nonce(principal: str) -> int:
-    """读取当前下界 → +1 → 持久化 → 返回新值。
+    """Read current floor → +1 → persist → return the new value.
 
-    `_principal_lock` 保证两个并发 skill 进程不会读到相同的旧值。两个并
-    发调用现在等同于 sequential：A 拿到 1，B 拿到 2，绝不重复。锁的范围
-    不跨网络请求，所以 stale lock（进程崩溃）会随 fd close 自动释放。
+    `_principal_lock` ensures two concurrent skill processes won't read the
+    same stale value. Two concurrent calls are now equivalent to sequential:
+    A gets 1, B gets 2, never duplicating. The lock scope does not span the
+    network request, so a stale lock (from a crashed process) is released
+    automatically when its fd closes.
     """
     with _principal_lock(principal):
         new = read_floor(principal) + 1
@@ -134,10 +143,11 @@ def next_nonce(principal: str) -> int:
 
 
 def bump_to(principal: str, server_stored: int) -> int:
-    """把本地下界抬到 `server_stored`（如果它更高），然后再 +1 返回。
+    """Raise the local floor to `server_stored` (if higher), then +1 and return.
 
-    在 `AUTH_NONCE_TOO_LOW` 重试路径上用 — 服务端 `/v1/auth/info` 会回
-    传当前 stored nonce；本函数原子地把本地推上去再分配下一个。
+    Used on the `AUTH_NONCE_TOO_LOW` retry path — the server's
+    `/v1/auth/info` returns the currently stored nonce; this function
+    atomically pushes the local floor up and allocates the next value.
     """
     with _principal_lock(principal):
         current = read_floor(principal)
@@ -150,7 +160,7 @@ def bump_to(principal: str, server_stored: int) -> int:
 
 
 def reset(principal: str, value: Optional[int] = None) -> None:
-    """重置（用于测试或显式同步）。`value=None` 删除文件。"""
+    """Reset (for tests or explicit syncs). `value=None` deletes the file."""
     with _principal_lock(principal):
         path = _nonce_path(principal)
         if value is None:

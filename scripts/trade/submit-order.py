@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""POST /v1/orders — 提交订单。
+"""POST /v1/orders — submit an order.
 
     submit-order.py --market 6 --worknet 11 --side buy --kind limit \
                     --price 0.2200 --quantity 100 \
@@ -9,11 +9,13 @@
                     [--visible-quantity Q] [--allow-synthesis BOOL] \
                     [--client-order-id TAG] [--idem-key UUID] [--yes]
 
-签名前会做 phase 预检查（避免服务端再返回 BUSINESS_PHASE_MISMATCH），
-并打印 [TX] 确认块；非交互场景必须显式 `--yes`。
+A phase pre-check runs before signing (so the server never has to return
+BUSINESS_PHASE_MISMATCH), and a [TX] confirmation block is printed;
+non-interactive scenarios must pass `--yes` explicitly.
 
-idem-key 默认每次生成新的 UUIDv4 — 如果你想重试同一个逻辑动作，**显式
-传入** 上次的 key（服务端按 (principal, key) 缓存响应 24h）。
+idem-key defaults to a fresh UUIDv4 per invocation — to retry the same
+logical action, **explicitly pass** the previous key (the server caches
+responses by (principal, key) for 24h).
 """
 from __future__ import annotations
 
@@ -39,9 +41,9 @@ from lib.govnet_lib import (  # noqa: E402
 
 
 def _phase_check(market_id: int) -> dict:
-    """先尝试 `/markets/{id}`（含 worknets[]），失败时退到 `/epochs/{id}`。
+    """Try `/markets/{id}` first (includes worknets[]); on failure, fall back to `/epochs/{id}`.
 
-    EpochInfo 用 `phase` 字段，Market schema 可能用 `status` —— 都试。
+    EpochInfo uses the `phase` field; Market schema may use `status` — try both.
     """
     market = fetch_market(market_id)
     phase = normalize_phase(market.get("phase") or market.get("status", ""))
@@ -55,19 +57,19 @@ def _phase_check(market_id: int) -> dict:
 
 
 def _power_check(principal: str, market_id: int) -> None:
-    """下单前先确认 principal 在本 epoch 有 AWP Power。
+    """Before submitting an order, verify the principal has AWP Power in this epoch.
 
-    生产服务端对 zero-power 用户下单当前会返回 500
+    The production server currently returns 500 for orders from zero-power users:
     `INTERNAL_UNEXPECTED_STATE: principal not initialized before reserve_for_buy`
-    （server-side bug，应该是 404 STATE_PRINCIPAL_NOT_IN_EPOCH）。客户端
-    先 GET /principals/{me}/power 拦下来，给用户友好提示，避免烧 nonce
-    + 看到看不懂的 500。
+    (a server-side bug — it should be 404 STATE_PRINCIPAL_NOT_IN_EPOCH). The
+    client GETs /principals/{me}/power up front to intercept this case, gives
+    the user a friendly message, and avoids burning a nonce on an inscrutable 500.
     """
     try:
         power = fetch("GET", f"/principals/{principal}/power",
                      params={"epoch_id": market_id})
     except EmgError as e:
-        # 404 直接转译；其它错误透传不要遮蔽
+        # Translate 404 directly; pass other errors through without masking
         if e.status == 404:
             raise EmgError(
                 "STATE_PRINCIPAL_NOT_IN_EPOCH",
@@ -89,7 +91,7 @@ def _power_check(principal: str, market_id: int) -> None:
                 status=404,
             )
     except (TypeError, ValueError, ArithmeticError):
-        # 不能解析就当成 0，让 server 自己判
+        # If we can't parse, treat as 0 and let the server decide
         pass
 
 
@@ -149,9 +151,10 @@ def main() -> int:
     if args.kind == "market" and args.post_only:
         ap.error("--post-only is invalid with market kind")
 
-    # OpenAPI `CreateOrderRequest` 没把 market_id 标 required，但生产服务端
-    # 实际要求（server-side validation 比 spec 严）。带上 market_id 之前
-    # 提交直接 422 missing field。
+    # OpenAPI's `CreateOrderRequest` does not mark market_id as required, but
+    # the production server actually requires it (server-side validation is
+    # stricter than the spec). Submitting without market_id goes straight to
+    # 422 missing field.
     body = {
         "market_id": args.market,
         "worknet_id": args.worknet,
@@ -176,8 +179,10 @@ def main() -> int:
     try:
         market = _phase_check(args.market)
         principal = wallet_address()
-        # power 预检 —— 比 phase check 后做，因为 power 失败的引导（去 awp-skill
-        # 质押）只在 epoch 的"开窗前"这段时间有意义；phase 已挂就先报 phase。
+        # Power pre-check — runs after phase check because the power-failure
+        # remedy (go stake via awp-skill) only makes sense in the
+        # before-window-opens window; if phase has already changed, surface the
+        # phase issue first.
         _power_check(principal, args.market)
         if not confirm(_confirm_block(args, market, args.idem_key), yes=args.yes):
             print(json.dumps({"cancelled": True}))

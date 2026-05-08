@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""按当前 phase 列出允许的操作 — agent 在不确定状态时优先调用本脚本。
+"""List allowed operations for the current phase — agents should call this first when state is unclear.
 
-    what-can-i-do.py [--epoch <id>]   # 不指定就读 /v1/epochs/current
+    what-can-i-do.py [--epoch <id>]   # without --epoch, reads /v1/epochs/current
 
-输出：
+Output:
     {
       "epoch_id": 6,
       "phase": "voting_and_trading",
@@ -29,7 +29,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from lib.govnet_lib import EmgError, emit_error, fetch, normalize_phase  # noqa: E402
 
 
-# 每个操作允许出现的 phase 集合 — 镜像 SKILL.md 的 phase × op 矩阵
+# Phase set in which each operation is allowed — mirrors SKILL.md's phase × op matrix
 _PHASE_MATRIX = {
     "list-markets":         {"pending", "voting_and_trading", "trading_only", "settling", "completed"},
     "list-worknets":        {"pending", "voting_and_trading", "trading_only", "settling", "completed"},

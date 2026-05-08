@@ -1,29 +1,30 @@
-"""EMG-SIG-V1 EIP-712 签名 — typed data 构造 + awp-wallet 桥接。
+"""EMG-SIG-V1 EIP-712 signing — typed-data construction + awp-wallet bridge.
 
-`sign_emg_request()` 是对外的唯一入口。它做三件事：
-1. 用 keccak256 计算 bodyHash（空 body 用 32 字节零）。
-2. 构造与 `crates/emg-auth/src/eip712.rs` 完全一致的 typed data JSON。
-3. 通过 `awp-wallet sign-typed-data --data <json>` 拿到 65 字节签名。
+`sign_emg_request()` is the single public entry point. It does three things:
+1. Compute the bodyHash via keccak256 (empty body uses 32 bytes of zero).
+2. Build a typed-data JSON exactly matching `crates/emg-auth/src/eip712.rs`.
+3. Call `awp-wallet sign-typed-data --data <json>` to obtain the 65-byte signature.
 
-我们 **不** 在 Python 里直接持有私钥；签名 ALWAYS 通过 awp-wallet。
-但为了在 tests/ 里跑已知答案数字摘要测试，我们还提供了
-`compute_eip712_digest()`，它本地用 eth_account 计算同样的摘要 — 这条路径
-不会接触私钥，纯粹用于交叉验证 typed data 构造。
+We do **not** hold the private key in Python; signing ALWAYS goes through awp-wallet.
+But to run known-answer digest tests under tests/, we also expose
+`compute_eip712_digest()`, which computes the same digest locally with eth_account —
+that path never touches the private key, it's purely for cross-checking the
+typed-data construction.
 
-# EMGVote 形态开关
+# EMGVote variant switch
 
-服务端 EMGVote 实际形态在 2026-05-08 deployment 后变了（见
-`docs/SKILL_API_LATEST.md` §2.3）。`docs/openapi.yaml` 还没跟上。
-所以本模块同时支持三种形态：
+The actual on-the-wire shape of EMGVote on the server changed in the
+2026-05-08 deployment (see `docs/SKILL_API_LATEST.md` §2.3). `docs/openapi.yaml`
+hasn't caught up yet. So this module supports all three shapes simultaneously:
 
-- `latest_2026_05`（默认）：6 字段，含 `principal/market_id/vote_revision/
-  vote_hash/prediction_hash/timestamp`，snake_case，对应**当前生产服务器**。
-- `main_spec`：5 字段（principal/epoch/voteHash/predictionHash/nonce, uint256），
-  对应旧 `01-MAIN-SPEC.md` §3。
-- `openapi`：4 字段（无 principal，epoch/nonce uint64，camelCase），对应
-  `02-openapi.yaml` 的 SignedVoteRequest.signature 描述（已被 LATEST 覆盖）。
+- `latest_2026_05` (default): 6 fields including `principal/market_id/vote_revision/
+  vote_hash/prediction_hash/timestamp`, snake_case, matches the **current production server**.
+- `main_spec`: 5 fields (principal/epoch/voteHash/predictionHash/nonce, uint256),
+  matches the legacy `01-MAIN-SPEC.md` §3.
+- `openapi`: 4 fields (no principal, epoch/nonce uint64, camelCase), matches
+  `02-openapi.yaml`'s SignedVoteRequest.signature description (now superseded by LATEST).
 
-`GOVNET_VOTE_TYPED_DATA_VARIANT` 环境变量切换。生产应当用默认。
+`GOVNET_VOTE_TYPED_DATA_VARIANT` selects between them. Production should use the default.
 """
 
 from __future__ import annotations
@@ -36,8 +37,8 @@ from typing import Dict, Optional
 from .canonical import eip712_body_hash
 
 
-# 与 crates/emg-auth/src/eip712.rs 中的 sol! 宏一致。字段顺序、名称、类型
-# 都是 typed-data 哈希的一部分，**绝对不能改动**。
+# Matches the sol! macro in crates/emg-auth/src/eip712.rs. Field order, names,
+# and types are all part of the typed-data hash and **must not change**.
 EMG_REQUEST_TYPES = {
     "EIP712Domain": [
         {"name": "name", "type": "string"},
@@ -56,10 +57,10 @@ EMG_REQUEST_TYPES = {
     ],
 }
 
-# 投票内层 typed data — primaryType 不同，domain 相同。
-# 三个变体见模块 docstring 的 "EMGVote 形态开关"。
+# Vote inner typed data — primaryType differs, domain is the same.
+# The three variants are documented in the module docstring under "EMGVote variant switch".
 
-# 当前生产形态（2026-05-08 deployment 起，见 SKILL_API_LATEST.md §2.3）。
+# Current production shape (since the 2026-05-08 deployment, see SKILL_API_LATEST.md §2.3).
 EMG_VOTE_TYPES_LATEST_2026_05 = {
     "EIP712Domain": EMG_REQUEST_TYPES["EIP712Domain"],
     "EMGVote": [
@@ -107,15 +108,16 @@ def _vote_types() -> Dict:
     return EMG_VOTE_TYPES_LATEST_2026_05
 
 
-# 旧名兼容 — 早期代码 import 这个，后续改成调 `_vote_types()`。
+# Legacy alias — early callers imported this; subsequent code switches to `_vote_types()`.
 EMG_VOTE_TYPES = EMG_VOTE_TYPES_LATEST_2026_05
 
 
 def _domain(auth_info: Dict) -> Dict:
-    """从 /v1/auth/info 的响应里抽出 EIP-712 domain 四元组。
+    """Extract the EIP-712 domain four-tuple from the /v1/auth/info response.
 
-    服务端返回 `eip712_domain: { name, version, chainId, verifyingContract }`，
-    但旧版本可能扁平化在顶层。两种形状都接受。
+    The server returns `eip712_domain: { name, version, chainId, verifyingContract }`,
+    but older versions might flatten the fields at the top level. Both shapes
+    are accepted.
     """
     if "eip712_domain" in auth_info:
         d = auth_info["eip712_domain"]
@@ -140,12 +142,12 @@ def build_emg_request_typed_data(
     timestamp: int,
     auth_info: Dict,
 ) -> Dict:
-    """构造 awp-wallet sign-typed-data 期望的 JSON 结构。
+    """Build the JSON structure that awp-wallet sign-typed-data expects.
 
-    `path` 必须是 POST-strip 路径 — 服务端 axum router 用 `nest("/v1", …)`
-    剥去前缀后，认证中间件看到的就是 `/orders` 而不是 `/v1/orders`。
-    例外：WS handshake 用 method `WS_HELLO`、path `/v1/ws`（dispatch 那
-    边读的是完整 URI 字面量）。
+    `path` must be the POST-strip path — the server's axum router uses
+    `nest("/v1", …)` to strip the prefix, so the auth middleware sees `/orders`,
+    not `/v1/orders`. Exception: WS handshake uses method `WS_HELLO` and path
+    `/v1/ws` (the WS dispatcher reads the full URI literal).
     """
     body_hash_hex = "0x" + eip712_body_hash(body).hex()
     return {
@@ -173,33 +175,38 @@ def build_emg_vote_typed_data(
     auth_info: Dict,
     vote_revision: Optional[int] = None,
     timestamp: Optional[int] = None,
-    # 旧形态兼容参数
+    # Legacy compatibility parameters
     epoch: Optional[int] = None,
     nonce: Optional[int] = None,
 ) -> Dict:
-    """构造投票内层 EMGVote typed data。
+    """Build the inner EMGVote typed data for voting.
 
-    投票需要两个签名：外层 EMGRequest 走标准 transport，内层 EMGVote 包含
-    投票完整性绑定，其签名进 POST body 的 `signature` 字段。
+    A vote requires two signatures: the outer EMGRequest goes through the
+    standard transport, the inner EMGVote contains the vote integrity
+    binding and its signature goes into the POST body's `signature` field.
 
-    形态由 `GOVNET_VOTE_TYPED_DATA_VARIANT` 决定（见模块 docstring）：
-      - `latest_2026_05`（默认 / 当前生产）：用 market_id + vote_revision +
-        timestamp，必传 `vote_revision` + `timestamp`，`epoch`/`nonce` 被忽略。
-      - `main_spec`：5 字段，把 market_id 当 epoch、把 vote_revision 当 nonce
-        发出；`timestamp` 被忽略；如果调用方只传了 epoch/nonce 也接受。
-      - `openapi`：4 字段，同 main_spec 但不带 principal。
+    The shape is determined by `GOVNET_VOTE_TYPED_DATA_VARIANT` (see module
+    docstring):
+      - `latest_2026_05` (default / current production): uses market_id +
+        vote_revision + timestamp; `vote_revision` + `timestamp` are required
+        and `epoch`/`nonce` are ignored.
+      - `main_spec`: 5 fields, market_id is sent as epoch and vote_revision
+        is sent as nonce; `timestamp` is ignored; if the caller passes only
+        epoch/nonce, that's also accepted.
+      - `openapi`: 4 fields, like main_spec but without principal.
 
-    所有形态都接受 `market_id` 作为 epoch/market 的统一名字 — 旧 `epoch=`
-    参数仍然可用，作为向后兼容入口。
+    All variants accept `market_id` as the unified name for epoch/market —
+    the legacy `epoch=` parameter still works as a backward-compatibility
+    entry point.
     """
     types = _vote_types()
     field_names = {f["name"] for f in types["EMGVote"]}
 
-    # 统一映射：epoch / market_id 二选一
+    # Unified mapping: pick from epoch / market_id
     market = market_id if market_id is not None else epoch
     if market is None:
         raise ValueError("must pass market_id (or legacy epoch=)")
-    # vote_revision / nonce 二选一
+    # Pick from vote_revision / nonce
     revision = vote_revision if vote_revision is not None else nonce
     if revision is None:
         raise ValueError("must pass vote_revision (or legacy nonce=)")
@@ -236,15 +243,15 @@ def build_emg_vote_typed_data(
     }
 
 
-# --- awp-wallet 桥接 ---------------------------------------------------------
+# --- awp-wallet bridge -------------------------------------------------------
 
 
 class WalletError(RuntimeError):
-    """awp-wallet 进程返回非零或输出无法解析。"""
+    """awp-wallet process returned non-zero or its output could not be parsed."""
 
 
 def _run_wallet(args, *, stdin: Optional[str] = None) -> str:
-    """统一调用 awp-wallet 的薄封装。环境变量 `AWP_WALLET` 可覆盖二进制路径。"""
+    """Thin wrapper that uniformly invokes awp-wallet. The `AWP_WALLET` env var overrides the binary path."""
     bin_name = os.environ.get("AWP_WALLET", "awp-wallet")
     try:
         proc = subprocess.run(
@@ -268,17 +275,17 @@ def _run_wallet(args, *, stdin: Optional[str] = None) -> str:
 
 
 def wallet_address() -> str:
-    """`awp-wallet receive` → 0x-hex 校验和地址。
+    """`awp-wallet receive` → 0x-hex checksummed address.
 
-    多版本兼容：
-    - 优先尝试 `--json` 模式（新版 awp-wallet）。返回的 JSON 字段名可能
-      是 `address` 或 `eoaAddress`，两个都接。
-    - 老版没有 `--json`：回落到无参 `receive`，从 stdout 里 grep 出第一
-      个看起来像 0x-prefixed 40-hex 的 token。
+    Multi-version compatibility:
+    - Try `--json` mode first (newer awp-wallet). The JSON field name may be
+      `address` or `eoaAddress`; both are accepted.
+    - Older versions lack `--json`: fall back to `receive` with no args and
+      grep the first 0x-prefixed 40-hex token from stdout.
     """
     import re
 
-    # 第一次尝试 --json
+    # First try --json
     try:
         out = _run_wallet(["receive", "--json"])
         try:
@@ -291,7 +298,7 @@ def wallet_address() -> str:
     except WalletError:
         pass
 
-    # 回落：plain text 模式，正则抽地址
+    # Fallback: plain text mode, regex out the address
     out = _run_wallet(["receive"])
     match = re.search(r"0x[0-9a-fA-F]{40}", out)
     if match:
@@ -302,7 +309,7 @@ def wallet_address() -> str:
 
 
 def wallet_sign_typed_data(typed_data: Dict) -> str:
-    """`awp-wallet sign-typed-data --data <json>` → 65 字节 0x-hex 签名。"""
+    """`awp-wallet sign-typed-data --data <json>` → 65-byte 0x-hex signature."""
     out = _run_wallet(["sign-typed-data", "--data", json.dumps(typed_data)])
     try:
         data = json.loads(out)
@@ -328,10 +335,11 @@ def sign_emg_request(
     auth_info: Dict,
     actor: Optional[str] = None,
 ) -> Dict[str, str]:
-    """端到端：构造 typed data → 调 awp-wallet 签名 → 返回五元组 header。
+    """End to end: build typed data → call awp-wallet to sign → return the five-tuple header.
 
-    `actor` 默认等于 `principal`。当一个 Manager 代签时，调用方应显式
-    传入 Manager 的地址 — 服务端会查询 `AWPRegistry.delegates`。
+    `actor` defaults to `principal`. When a Manager signs on behalf of someone,
+    callers should pass the Manager's address explicitly — the server will
+    look up `AWPRegistry.delegates`.
     """
     typed_data = build_emg_request_typed_data(
         principal=principal,
@@ -367,11 +375,12 @@ def sign_emg_vote(
     epoch: Optional[int] = None,
     nonce: Optional[int] = None,
 ) -> str:
-    """投票内层签名 — 返回 65 字节 0x-hex。POST body 里放在 `signature` 字段。
+    """Inner vote signature — returns 65-byte 0x-hex. Goes into the `signature` field of the POST body.
 
-    `latest_2026_05` 形态（默认）需要 `vote_revision` + `timestamp`；旧形态
-    `main_spec` / `openapi` 把 vote_revision 当作 nonce 使用，`timestamp` 被
-    忽略。`epoch` 是 `market_id` 的旧别名，仅做向后兼容入参。
+    The `latest_2026_05` shape (default) requires `vote_revision` + `timestamp`;
+    legacy `main_spec` / `openapi` shapes treat vote_revision as nonce and
+    ignore `timestamp`. `epoch` is the legacy alias for `market_id`, kept only
+    as a backward-compatibility input.
     """
     typed_data = build_emg_vote_typed_data(
         principal=principal,
@@ -387,19 +396,22 @@ def sign_emg_vote(
     return wallet_sign_typed_data(typed_data)
 
 
-# --- 本地摘要计算（仅用于已知答案测试，不走私钥） ---------------------------
+# --- Local digest computation (for known-answer tests only; never touches the private key) ---
 
 
 def compute_eip712_digest(typed_data: Dict) -> bytes:
-    """本地复算 EIP-712 摘要 `keccak256("\\x19\\x01" || domainSeparator || hashStruct)`。
+    """Locally recompute the EIP-712 digest `keccak256("\\x19\\x01" || domainSeparator || hashStruct)`.
 
-    用于 tests/test_sign.py 里把构造出来的 typed data 喂给 `eth_account` 的
-    `encode_typed_data` — 如果摘要等于 REFERENCE_DIGEST_HEX，就证明字段顺
-    序、类型、编码全部对齐 Rust 参考实现。**不会** 触发签名，所以无私钥访问。
+    Used in tests/test_sign.py to feed the typed data we built into
+    eth_account's `encode_typed_data` — if the digest equals
+    REFERENCE_DIGEST_HEX, that proves field order, types, and encoding
+    line up with the Rust reference implementation. **Never** triggers signing,
+    so no private-key access happens.
 
-    注意 eth_account 0.13.x 的 `encode_typed_data` 必须用 `full_message=`
-    关键字参数；返回的 `SignableMessage` 暴露 `header`（domain separator）
-    和 `body`（hashStruct），合并即得 EIP-712 摘要。
+    Note: eth_account 0.13.x's `encode_typed_data` requires the
+    `full_message=` keyword argument; the returned `SignableMessage` exposes
+    `header` (domain separator) and `body` (hashStruct), and concatenating
+    them gives the EIP-712 digest.
     """
     from eth_account.messages import encode_typed_data
     from .canonical import keccak256

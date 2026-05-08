@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""订阅 phase 频道 — epoch 状态机变迁的实时通知。
+"""Subscribe to the phase channel — live notifications of epoch state-machine transitions.
 
     watch-phase.py
 """

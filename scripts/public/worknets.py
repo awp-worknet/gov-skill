@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""GET /v1/worknets — worknet 目录（id ↔ name 解析）。
+"""GET /v1/worknets — worknet directory (id ↔ name resolution).
 
-    worknets.py                  # 全部 worknets
-    worknets.py --name aGOV      # 按名字反查 id
-    worknets.py --id 11          # 按 id 取详情
+    worknets.py                  # all worknets
+    worknets.py --name aGOV      # reverse-lookup id by name
+    worknets.py --id 11          # fetch a single worknet's detail
 
-worknet 名字（如 aMINE / aGOV / aPRED）会随 epoch 变化 — 不要在 skill
-里硬编码任何映射，每次需要时调用本脚本。
+worknet names (e.g. aMINE / aGOV / aPRED) change with each epoch — do not
+hardcode any mapping in the skill; call this script each time you need one.
 """
 from __future__ import annotations
 

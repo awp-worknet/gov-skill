@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""POST /v1/comments/{id}/endorse — 给评论点赞（重复点赞不报错）。
+"""POST /v1/comments/{id}/endorse — endorse a comment (duplicates are no-ops, not errors).
 
     endorse.py --id 018f-…  [--yes]
 """

@@ -1,19 +1,21 @@
 #!/usr/bin/env python3
-"""POST /v1/reports — worknet 周报（仅 worknet operator 可发）。
+"""POST /v1/reports — worknet weekly report (only worknet operators can post).
 
     post-report.py --market 6 --worknet 11 \
                    --content-file weekly.md \
                    --metrics-file metrics.json \
                    [--requested-share 0.15] [--idem-key UUID] [--yes]
 
-content 上限 50 000 字符。`metrics` 是结构化 JSON（如 active_miners、
-tasks_completed 等）。同一 (market_id, worknet_id) 一周只能提交一次 —
-重复提交返回 409 `BUSINESS_REPORT_ALREADY_SUBMITTED`（post-2026-05-08，
-旧版本是 `STATE_IDEMPOTENCY_KEY_MISMATCH`）。
+content is capped at 50 000 chars. `metrics` is structured JSON (e.g.
+active_miners, tasks_completed, etc.). The same (market_id, worknet_id)
+can only submit once per week — duplicate submissions return 409
+`BUSINESS_REPORT_ALREADY_SUBMITTED` (post-2026-05-08; older versions
+returned `STATE_IDEMPOTENCY_KEY_MISMATCH`).
 
-`market_id` 是 per-report 维度；OpenAPI WeeklyReportRequest 没把它标
-required，但服务端实际用 `(market, worknet)` 做去重，与 submit-order /
-positions/* 一致的 spec-lag 模式 —— 显式发以避免被 422 拒。
+`market_id` is per-report dimension; OpenAPI's WeeklyReportRequest does
+not mark it required, but the server actually uses `(market, worknet)`
+for deduplication — same spec-lag pattern as submit-order / positions/*.
+Send it explicitly to avoid being rejected with 422.
 """
 from __future__ import annotations
 
@@ -64,15 +66,16 @@ def main() -> int:
         "metrics": metrics,
     }
     if args.requested_share is not None:
-        # 服务端 schema 是 string format: decimal，但参数本身代表概率/份额，
-        # 必须在 [0, 1]。客户端先解析+范围检查，省去服务端 400 + 含糊错误信息。
+        # The server schema is string format: decimal, but the parameter itself
+        # represents a probability/share and must be in [0, 1]. Parse and
+        # range-check on the client to save a vague 400 from the server.
         try:
             share = Decimal(args.requested_share)
         except InvalidOperation:
             ap.error(f"--requested-share {args.requested_share!r} is not a valid decimal")
         if not (Decimal("0") <= share <= Decimal("1")):
             ap.error(f"--requested-share must be in [0, 1]; got {share}")
-        body["requested_share"] = args.requested_share  # 原样发，保留 scale
+        body["requested_share"] = args.requested_share  # send as-is, preserving scale
 
     prompt = (
         "[TX] post weekly report:\n"

@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-"""订阅 book.{m}.{wn}（或 book.{wn} — 服务端两种命名都支持）。
+"""Subscribe to book.{m}.{wn} (or book.{wn} — the server supports both naming conventions).
 
     watch-book.py --market 6 --worknet 11
-    watch-book.py --channel "book.6.11"   # 直接传 raw channel id
+    watch-book.py --channel "book.6.11"   # pass the raw channel id directly
 
-每条事件按 JSON-Lines 输出到 stdout。BookDelta 中 `new_quantity` 是
-**绝对** 量，0 = 该 price level 已清空 — 不要把它当增量。
+Each event is emitted to stdout as JSON-Lines. In BookDelta, `new_quantity`
+is the **absolute** amount; 0 = the price level has been cleared — do not
+treat it as a delta.
 """
 from __future__ import annotations
 

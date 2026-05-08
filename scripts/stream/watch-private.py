@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""认证 WebSocket 会话 + 订阅任意 asyncapi 频道 —— 不仅限私有流。
+"""Authenticated WebSocket session + subscribe to any asyncapi channel — not just private streams.
 
-    watch-private.py                         # 默认 fills.me + orders.me
+    watch-private.py                         # defaults to fills.me + orders.me
     watch-private.py --channels fills.me,orders.me,account
-    watch-private.py --channels phase,book.6.11   # 也可以混订公开频道
+    watch-private.py --channels phase,book.6.11   # public channels can be mixed in too
 
-asyncapi 支持的全部 8 个频道：
+All 8 asyncapi-supported channels:
     public            book.{m}.{wn}
                       klines.{m}.{wn}.{interval}
                       phase
@@ -13,15 +13,17 @@ asyncapi 支持的全部 8 个频道：
                       comments
     auth required     fills.me
                       orders.me
-                      account              # 自己的 PrincipalCurrentState 变更
+                      account              # changes to your own PrincipalCurrentState
 
-虽然脚本叫 watch-private，本质上是「先 auth.hello 再订阅」—— 一旦 session
-认证成功，订阅清单可以混入任意公开频道。如果只想订公开频道、不想出 nonce
-和签名 wallet，请改用 watch-book / watch-klines / watch-phase 之一。
+Despite the script being named watch-private, it is essentially "auth.hello
+first then subscribe" — once a session authenticates, the subscribe list
+can mix in any public channel. If you only want public channels and don't
+want to spend a nonce and a wallet signature, use watch-book / watch-klines
+/ watch-phase instead.
 
-签名材料：method=WS_HELLO, path=/v1/ws — 注意 WS handshake 的 path **不**
-去 `/v1` 前缀（与 REST POST-strip 不同），原因见 SKILL.md "Critical
-contract gotchas"。
+Signing material: method=WS_HELLO, path=/v1/ws — note that the WS handshake's
+path **does not** strip the `/v1` prefix (unlike REST POST-strip); see
+SKILL.md "Critical contract gotchas" for why.
 """
 from __future__ import annotations
 

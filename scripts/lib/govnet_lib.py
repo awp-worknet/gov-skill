@@ -1,10 +1,10 @@
-"""REST 客户端、错误映射、Decimal/价格格式化 — 所有脚本共享的工具层。
+"""REST client, error mapping, Decimal/price formatting — shared utilities used by all scripts.
 
-设计目标：
-- 公开读 (`fetch`) 不签名，私有读/写 (`signed_request`) 自动注入五元组 header。
-- 所有错误统一抛 `EmgError` — 调用方只需要 try/except 一次。
-- 配合 `nonce.bump_to` + `auth-info` 缓存自动处理 `NONCE_TOO_LOW` 重试。
-- 强制 HTTPS / WSS — 防止中间人剥掉 EMG-SIG 头。
+Design goals:
+- Public reads (`fetch`) skip signing; private reads/writes (`signed_request`) auto-inject the five-tuple header.
+- All errors funnel through `EmgError` — callers only need a single try/except.
+- Combined with `nonce.bump_to` + the `auth-info` cache, `NONCE_TOO_LOW` retries happen automatically.
+- HTTPS / WSS enforced — prevents a man-in-the-middle from stripping the EMG-SIG headers.
 """
 
 from __future__ import annotations
@@ -25,14 +25,14 @@ from .canonical import build_query
 from .sign import sign_emg_request, wallet_address
 
 
-# 默认 endpoint — 可通过环境变量覆盖。所有 URL 必须是 HTTPS / WSS。
+# Default endpoints — overridable via environment variables. All URLs must be HTTPS / WSS.
 API_BASE = os.environ.get("GOVNET_API_BASE", "https://api.gov.works/v1").rstrip("/")
 WS_URL = os.environ.get("GOVNET_WS_URL", "wss://api.gov.works/v1/ws")
 
-# 网络请求默认超时（秒）。流式订阅在 ws.py 里另行设置。
+# Default network request timeout (seconds). Streaming subscriptions set their own in ws.py.
 HTTP_TIMEOUT = float(os.environ.get("GOVNET_HTTP_TIMEOUT", "10"))
 
-# Auth-info 缓存目录。
+# Auth-info cache directory.
 def _auth_info_path() -> Path:
     base = os.environ.get("GOVNET_AUTH_DIR")
     p = Path(base).expanduser() if base else Path.home() / ".govnet"
@@ -50,11 +50,11 @@ def _enforce_https(url: str) -> None:
         )
 
 
-# --- 异常 -------------------------------------------------------------------
+# --- Exceptions -------------------------------------------------------------
 
 
 class EmgError(RuntimeError):
-    """统一的协议层异常 — `code` 来自服务端 §9.5.1 codebook。"""
+    """Unified protocol-layer exception — `code` comes from the server's §9.5.1 codebook."""
 
     def __init__(
         self,
@@ -95,16 +95,18 @@ def _problem_to_error(status: int, raw: bytes, headers: Dict[str, str]) -> EmgEr
 
 
 class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
-    """拒绝任何 30x 重定向 —— 防签名 header 被代发到攻击者控制的目标。
+    """Reject any 30x redirect — prevents signed headers from being relayed to an attacker-controlled target.
 
-    威胁模型：urllib 默认的 HTTPRedirectHandler 会跟随 301/302/303/307/308，
-    并且**把全部 header 一起转发**（包括我们的 X-EMG-* 五元组签名头）。
-    如果生产域名被中间人或 misconfig DNS 指向 `attacker.example`，攻击者
-    返回一个看似无害的 302 就能拿到我们的合法签名，replay 到真服务器。
+    Threat model: urllib's default HTTPRedirectHandler follows 301/302/303/307/308
+    and **forwards all headers** (including our X-EMG-* five-tuple signature
+    headers). If the production domain is MITM'd or a misconfigured DNS points
+    at `attacker.example`, the attacker can return a benign-looking 302 to
+    capture our valid signature and replay it against the real server.
 
-    `_enforce_https` 只查初始 URL，不查 redirect target。装这个 handler
-    保证我们 **永不** 跟随重定向 —— 服务端真要换地址，应该走 DNS / load
-    balancer / 客户端配置 (`GOVNET_API_BASE`)，不应该靠 30x。
+    `_enforce_https` only checks the initial URL, not the redirect target.
+    Installing this handler guarantees we **never** follow a redirect — if the
+    server really wants to move, it should do so via DNS / load balancer /
+    client config (`GOVNET_API_BASE`), not via a 30x.
     """
     def http_error_301(self, req, fp, code, msg, headers):
         raise EmgError(
@@ -119,7 +121,7 @@ class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
     http_error_308 = http_error_301
 
 
-# 用模块级 opener 替换默认 —— 影响 `_request` 里所有 urlopen 调用
+# Module-level opener replaces the default — affects every urlopen call inside `_request`.
 _OPENER = urllib.request.build_opener(_NoRedirectHandler())
 
 
@@ -131,10 +133,11 @@ def _request(
     body: Optional[bytes] = None,
     timeout: Optional[float] = None,
 ) -> Tuple[int, bytes, Dict[str, str]]:
-    """裸 HTTP 调用 — 不解析 JSON，只做错误码翻译。
+    """Raw HTTP call — does not parse JSON, only translates error codes.
 
-    用本模块的 `_OPENER`（禁用了 redirect）而不是 `urllib.request.urlopen`
-    全局 opener，避免 redirect 携带签名 header 泄露到第三方域名。
+    Uses this module's `_OPENER` (redirects disabled) instead of the global
+    `urllib.request.urlopen` opener, to keep redirects from leaking signed
+    headers to third-party domains.
     """
     _enforce_https(url)
     req = urllib.request.Request(url, data=body, method=method.upper())
@@ -154,15 +157,17 @@ def _request(
 
 
 def fetch(method: str, path: str, *, params: Optional[Dict] = None, body: Optional[Any] = None) -> Any:
-    """公开读 — 拼 URL + 调用 `_request` + 解析 JSON。
+    """Public read — assemble URL, call `_request`, parse JSON.
 
-    `path` 以 `/` 开头但 **不带 `/v1` 前缀**（API_BASE 已经包含 `/v1`）。
-    例如 `fetch("GET", "/auth/info")` → URL `https://api.gov.works/v1/auth/info`。
-    `params` 会经规范化后 append 为 query string。`body` 若是 dict 会 JSON
-    编码。返回解析后的 JSON 或 None（204）。
+    `path` starts with `/` but **does not include the `/v1` prefix** (API_BASE
+    already contains `/v1`). For example `fetch("GET", "/auth/info")` →
+    URL `https://api.gov.works/v1/auth/info`. `params` is normalized then
+    appended as a query string. `body`, if a dict, is JSON-encoded. Returns
+    the parsed JSON or None (204).
 
-    注意：`API_BASE` 默认 `https://api.gov.works/v1`；若 `GOVNET_API_BASE`
-    覆盖成不带 `/v1` 的 URL（自部署 / 反代场景），调用方需要相应调整 path。
+    Note: `API_BASE` defaults to `https://api.gov.works/v1`; if `GOVNET_API_BASE`
+    is overridden to a URL without `/v1` (self-hosted / reverse-proxy scenarios),
+    callers must adjust the path accordingly.
     """
     if not path.startswith("/"):
         path = "/" + path
@@ -174,8 +179,8 @@ def fetch(method: str, path: str, *, params: Optional[Dict] = None, body: Option
     raw_body: Optional[bytes] = None
     headers: Dict[str, str] = {"Accept": "application/json", "User-Agent": "govnet-skill/0.1"}
     if body is not None:
-        # 紧凑 JSON 与 signed_request 一致 —— 让来日万一从 fetch 改走签名路径
-        # 时不会因为 separator 不同而 bodyHash 漂移
+        # Compact JSON matches signed_request — so if we ever switch a fetch
+        # path to use signing, the bodyHash won't drift due to separator differences.
         raw_body = json.dumps(body, separators=(",", ":")).encode("utf-8")
         headers["Content-Type"] = "application/json"
 
@@ -188,7 +193,7 @@ def fetch(method: str, path: str, *, params: Optional[Dict] = None, body: Option
         raise EmgError("MALFORMED_JSON", f"server returned non-JSON: {data[:200]!r}") from e
 
 
-# --- 自动翻页 ---------------------------------------------------------------
+# --- Auto-pagination --------------------------------------------------------
 
 
 def paginate_all(
@@ -201,24 +206,28 @@ def paginate_all(
     cursor_key: str = "next_cursor",
     has_more_key: str = "has_more",
 ) -> Dict[str, Any]:
-    """跟着 cursor 翻完所有页，把所有 `data[]` 拼回一个数组。
+    """Walk every page following the cursor and concatenate each `data[]` into one array.
 
-    `fetch_page(params: dict) -> dict` 是调用方提供的回调，应返回服务端的
-    分页响应（含 `data[]` 和 `pagination.{next_cursor, has_more}`）。本函数
-    不关心是 `fetch()` 还是 `signed_request()` 拉的，公开/私有列表都能复用。
+    `fetch_page(params: dict) -> dict` is a callback supplied by the caller;
+    it should return the server's pagination response (containing `data[]` and
+    `pagination.{next_cursor, has_more}`). This function does not care whether
+    `fetch()` or `signed_request()` produced the page, so public/private
+    listings can both reuse it.
 
-    停止条件优先级（OpenAPI `Pagination` schema 把 `has_more` 标 required，
-    `next_cursor` 是 nullable + 非 required，所以 `has_more` 才是权威信号）：
-        1. `has_more` 显式 false → 停（无视 cursor 是否为空）
-        2. 没有可用 cursor → 停（即便 has_more 不一致也无法前进）
-        3. 否则继续
+    Stop-condition priority (the OpenAPI `Pagination` schema marks `has_more`
+    required while `next_cursor` is nullable + not required, so `has_more`
+    is the authoritative signal):
+        1. `has_more` explicitly false → stop (regardless of whether the cursor is empty)
+        2. No usable cursor → stop (even with inconsistent has_more we can't advance)
+        3. Otherwise continue
 
-    `max_pages` 是防呆 —— 数据量异常大或服务端 cursor 出 bug 死循环时
-    强制截断；超过会在返回的 dict 里加 `truncated_at_max_pages: true` +
-    `next_cursor`，调用方/agent 自己判断要不要接力翻更多。
+    `max_pages` is a safety cap — when the data set is unusually large or the
+    server's cursor logic falls into an infinite loop, we force a stop;
+    exceeding it sets `truncated_at_max_pages: true` plus `next_cursor` in the
+    returned dict so the caller/agent can decide whether to keep paging.
 
-    返回 `{data: [...合并...], pagination: {...最后一页的...}, page_count: N}`，
-    保留服务端原本响应的其它字段（除了 data 是合并的）。
+    Returns `{data: [...merged...], pagination: {...from the last page...}, page_count: N}`,
+    preserving any other fields the server returned (besides the merged data).
     """
     params = dict(initial_params or {})
     aggregated: list = []
@@ -233,16 +242,16 @@ def paginate_all(
         pagination = last_resp.get(pagination_key) or {}
         last_cursor = pagination.get(cursor_key)
         has_more = pagination.get(has_more_key)
-        # has_more 显式 false → 服务端确定地告诉我们没了
+        # has_more explicitly false → server is telling us definitively there's nothing left
         if has_more is False:
             break
-        # 没 cursor 可用 → 即便 has_more 是 None / true，我们也无法继续
+        # No usable cursor → even if has_more is None / true, we can't advance
         if not last_cursor:
             break
         params = dict(params)
         params["cursor"] = last_cursor
     out: Dict[str, Any] = {data_key: aggregated, "page_count": pages}
-    # 截断时把接力 cursor 暴露给调用方
+    # On truncation, expose the relay cursor to the caller
     if pages == max_pages and last_cursor:
         out["truncated_at_max_pages"] = True
         out["next_cursor"] = last_cursor
@@ -251,43 +260,44 @@ def paginate_all(
     return out
 
 
-# --- auth info 缓存 ----------------------------------------------------------
+# --- auth info cache ---------------------------------------------------------
 
 
 def get_auth_info(*, force_refresh: bool = False) -> Dict[str, Any]:
-    """`GET /v1/auth/info` 并缓存到 `~/.govnet/auth-info.json`。
+    """`GET /v1/auth/info` and cache to `~/.govnet/auth-info.json`.
 
-    强制刷新场景：`AUTH_SIGNATURE_INVALID`（可能服务端换了 verifyingContract）
-    或 `AUTH_NONCE_TOO_LOW`（顺便核对 chainId 没飘）。
+    Force-refresh scenarios: `AUTH_SIGNATURE_INVALID` (the server may have
+    rotated verifyingContract) or `AUTH_NONCE_TOO_LOW` (also good for
+    confirming chainId hasn't drifted).
     """
     cache = _auth_info_path()
     if not force_refresh and cache.exists():
         try:
             return json.loads(cache.read_text("utf-8"))
         except json.JSONDecodeError:
-            pass  # fall through 重新获取
+            pass  # fall through and re-fetch
     info = fetch("GET", "/auth/info")
     cache.write_text(json.dumps(info), "utf-8")
     return info
 
 
-# --- 服务端时钟探测 ---------------------------------------------------------
+# --- Server clock probe -----------------------------------------------------
 
 
 def fetch_server_time() -> int:
-    """`GET /v1/auth/time` —— 仅返回 server 当前 Unix 秒。轻量 clock probe。
+    """`GET /v1/auth/time` — returns only the server's current Unix seconds. Lightweight clock probe.
 
-    用途：
-    - `AUTH_TIMESTAMP_OUT_OF_WINDOW` 错误时校准本地，重签后重试。
-    - 离线脚本启动时主动测漂移，超 30s 直接提示用户 NTP sync。
+    Use cases:
+    - On `AUTH_TIMESTAMP_OUT_OF_WINDOW`, recalibrate locally and retry after re-signing.
+    - At offline-script startup, probe drift; > 30s should prompt the user to NTP-sync.
 
-    无 auth，无缓存（每次 fresh）。失败 raise `EmgError`。
+    No auth, no caching (always fresh). Failures raise `EmgError`.
     """
     resp = fetch("GET", "/auth/time")
     return int(resp["server_time_unix"])
 
 
-# --- 签名请求（自动 nonce + 重试） -------------------------------------------
+# --- Signed request (auto nonce + retry) -----------------------------------
 
 
 def signed_request(
@@ -302,25 +312,27 @@ def signed_request(
     idempotency_key: Optional[str] = None,
     auto_retry_nonce: bool = True,
 ) -> Any:
-    """签名 → 发送 → 解析 — 私有读/写的统一入口。
+    """Sign → send → parse — the unified entry point for private reads/writes.
 
-    - `sign_path`：写进 EIP-712 信封 `path` 字段的值（POST-strip 形式，
-      服务端 axum router `nest("/v1", …)` strip 后看到的路径）。
-    - `full_path`：拼到 `API_BASE` 后面的路径，**不带** `/v1` 前缀
-      （API_BASE 已经含 `/v1`）。多数情况下 `full_path == sign_path`。
-    - `query_params`：dict；会被 `build_query` 规范化后 append 到 URL，
-      同时也作为签名材料里的 `query` 字段。
-    - `body`：dict → JSON。`bytes` 直接透传。`None` 表示空 body。
-    - `principal`：缺省调用 `awp-wallet receive` 拿；`actor` 默认与
-      principal 一致。
-    - `idempotency_key`：写操作建议每个逻辑动作生成一个 UUIDv7；重试
-      时复用同一个 key（服务端缓存 24h 响应）。
-    - `auto_retry_nonce`：碰到 `NONCE_TOO_LOW` 时刷新 auth-info、bump
-      本地下界、重试一次。
+    - `sign_path`: the value written into the EIP-712 envelope's `path` field
+      (POST-strip form, the path the server's axum router sees after
+      `nest("/v1", …)` strips the prefix).
+    - `full_path`: the path appended to `API_BASE`, **without** the `/v1`
+      prefix (API_BASE already contains `/v1`). In most cases
+      `full_path == sign_path`.
+    - `query_params`: dict; normalized via `build_query` and appended to the
+      URL, while also serving as the `query` field in signing material.
+    - `body`: dict → JSON. `bytes` is forwarded verbatim. `None` means empty body.
+    - `principal`: defaults to calling `awp-wallet receive`; `actor` defaults
+      to the same value as principal.
+    - `idempotency_key`: writes should generate one UUIDv7 per logical action;
+      reuse the same key on retry (the server caches the response for 24h).
+    - `auto_retry_nonce`: on `NONCE_TOO_LOW`, refresh auth-info, bump the
+      local floor, and retry once.
 
-    返回解析后的响应 JSON。
+    Returns the parsed response JSON.
     """
-    from . import nonce as nonce_mod  # 延迟导入避免循环
+    from . import nonce as nonce_mod  # deferred import to avoid circular dependency
 
     if principal is None:
         principal = wallet_address()
@@ -335,8 +347,9 @@ def signed_request(
     else:
         raw_body = json.dumps(body, separators=(",", ":")).encode("utf-8")
 
-    # `_clock_offset` 在 AUTH_TIMESTAMP_OUT_OF_WINDOW 重试路径里被覆盖：
-    # 拿服务端 now − 本地 now 的差值，让重试时签名的 timestamp 落进窗口。
+    # `_clock_offset` is overwritten on the AUTH_TIMESTAMP_OUT_OF_WINDOW retry
+    # path: take the (server now − local now) delta so the retry signature's
+    # timestamp falls inside the window.
     clock_offset = {"delta": 0}
 
     def _attempt(n: int) -> Any:
@@ -381,8 +394,9 @@ def signed_request(
         if not auto_retry_nonce:
             raise
         if err.code in ("AUTH_NONCE_TOO_LOW", "NONCE_TOO_LOW", "NONCE_CONFLICT"):
-            # 刷新 auth-info 顺便能拿到 server stored nonce（如果服务端在
-            # /v1/auth/info 里返回了的话）；最坏情况 +1 已知 floor 重试。
+            # Refreshing auth-info also gets us the server-stored nonce (if
+            # the server returns it via /v1/auth/info); worst case, retry
+            # with floor + 1.
             fresh = get_auth_info(force_refresh=True)
             stored = int(
                 err.body.get("details", {}).get("stored")
@@ -392,10 +406,11 @@ def signed_request(
             new = nonce_mod.bump_to(principal, max(stored, nonce))
             return _attempt(new)
         if err.code == "AUTH_TIMESTAMP_OUT_OF_WINDOW":
-            # 客户端时钟偏移：从 /v1/auth/time 取服务端 now，把 (server − local)
-            # 差值压进 clock_offset，让 _attempt 下一次签名出来的 timestamp
-            # 落在服务端 ±30s 窗口内。如果偏移仍 > 30s（很罕见，意味着 NTP
-            # 可能 stuck）retry 还会失败；那时 EmgError detail 会显式提示。
+            # Client clock skew: pull the server's now from /v1/auth/time,
+            # write the (server − local) delta into clock_offset so _attempt's
+            # next signature has a timestamp inside the server's ±30s window.
+            # If the offset still > 30s (rare, suggests NTP is stuck), the
+            # retry will fail and EmgError detail will explicitly say so.
             try:
                 srv_time = fetch_server_time()
             except EmgError:
@@ -417,34 +432,38 @@ def signed_request(
                     ) from retry_err
                 raise
         if err.code == "AUTH_EIP712_DOMAIN_MISMATCH":
-            # 服务端 chainId 或 verifyingContract 变了。强制 refresh + retry。
+            # Server changed chainId or verifyingContract. Force refresh + retry.
             nonlocal_auth = get_auth_info(force_refresh=True)
-            # _attempt 闭包里的 auth_info 是引用上层的，需要重 build。
-            # 简化路径：清缓存 + raise EmgError 让上层重新调 signed_request。
-            # 但这违反 "auto retry once" 约定 —— 这里就在闭包内重写一次：
+            # _attempt's closure-captured auth_info refers to the outer object;
+            # we need to rebuild it. Simple path: clear cache + raise EmgError
+            # so the upper layer re-invokes signed_request. But that violates
+            # the "auto retry once" contract — so instead we rewrite the
+            # closure's reference in place:
             new_nonce = nonce_mod.next_nonce(principal)
-            # auth_info 已通过 get_auth_info 缓存层更新；下次 _attempt 读
-            # 全局缓存即可（_attempt 闭包持的是同一对象引用，已被覆盖）
+            # auth_info has already been updated by the get_auth_info cache layer;
+            # the next _attempt reads the global cache (the closure holds the
+            # same object reference, which we've now overwritten in place).
             auth_info.clear()
             auth_info.update(nonlocal_auth)
             return _attempt(new_nonce)
         if err.status == 429:
-            # 服务端 rate-limit；honor Retry-After header（秒），上限 60s 防呆
+            # Server rate-limit; honor Retry-After header (seconds), capped at 60s as a safety net
             wait = _parse_retry_after(err.headers.get("Retry-After"))
             time.sleep(wait)
             new_nonce = nonce_mod.next_nonce(principal)
             return _attempt(new_nonce)
-        # 5xx + nonce-burned 表示服务端已消费 nonce — 推一下下界再交给上层重试
+        # 5xx + nonce-burned means the server already consumed the nonce — bump the floor before letting the upper layer retry
         if err.headers.get("X-EMG-Nonce-Burned", "").lower() == "true":
             nonce_mod.bump_to(principal, nonce)
         raise
 
 
 def _parse_retry_after(header: Optional[str], default: float = 1.0, cap: float = 60.0) -> float:
-    """解析 `Retry-After` —— 既支持 delta-seconds（数字），也支持 HTTP-date。
+    """Parse `Retry-After` — supports both delta-seconds (numeric) and HTTP-date.
 
-    异常输入回 default；任何上限超过 `cap` 秒强制截断，防止 misconfigured
-    服务端把客户端挂到下个世纪。一次重试就好，多了打回上层。
+    Bad input falls back to default; any value above `cap` seconds is forcibly
+    truncated, preventing a misconfigured server from parking the client into
+    the next century. One retry is enough; anything more bubbles up.
     """
     if not header:
         return default
@@ -455,7 +474,7 @@ def _parse_retry_after(header: Optional[str], default: float = 1.0, cap: float =
         pass
     try:
         # HTTP-date format: "Wed, 21 Oct 2026 07:28:00 GMT" — `parsedate_to_datetime`
-        # 要么返回 datetime，要么 raise (TypeError/ValueError)；不会返回 None
+        # either returns a datetime or raises (TypeError/ValueError); it does not return None
         from email.utils import parsedate_to_datetime
         target = parsedate_to_datetime(header)
         delta = (target - datetime.now(timezone.utc)).total_seconds()
@@ -464,7 +483,7 @@ def _parse_retry_after(header: Optional[str], default: float = 1.0, cap: float =
         return default
 
 
-# --- 显示辅助 ---------------------------------------------------------------
+# --- Display helpers --------------------------------------------------------
 
 
 _FOUR = Decimal("0.0001")
@@ -472,10 +491,11 @@ _EIGHT = Decimal("0.00000001")
 
 
 def fmt_dec(value, places: int = 4) -> str:
-    """把 wire 上的 string-decimal 量化到 `places` 位用于展示。
+    """Quantize a wire-format string-decimal to `places` digits for display.
 
-    用 `ROUND_HALF_EVEN`（银行家舍入）— 与服务端结算的 rust_decimal 默
-    认行为一致，避免显示层和结算层产生 ±1 ULP 的视觉差异。
+    Uses `ROUND_HALF_EVEN` (banker's rounding) — matches the server's
+    rust_decimal default settlement behavior, avoiding a ±1 ULP visual delta
+    between the display layer and the settlement layer.
     """
     if value is None:
         return "—"
@@ -485,16 +505,16 @@ def fmt_dec(value, places: int = 4) -> str:
 
 
 def fmt_price(value) -> str:
-    """价格统一展示 4 位小数。"""
+    """Prices are uniformly displayed with 4 decimal places."""
     return fmt_dec(value, 4)
 
 
 def fmt_amount(value) -> str:
-    """数量按 8 位小数展示，与服务端 quantity step 一致。"""
+    """Amounts use 8 decimal places, matching the server's quantity step."""
     return fmt_dec(value, 8)
 
 
-# --- 阶段归一化 -------------------------------------------------------------
+# --- Phase normalization ----------------------------------------------------
 
 
 _PHASE_ALIASES = {
@@ -512,19 +532,19 @@ _PHASE_ALIASES = {
 
 
 def normalize_phase(s: str) -> str:
-    """把服务端可能出现的两种风格（snake_case / CamelCase）压成单一形式。"""
+    """Collapse the two styles the server might emit (snake_case / CamelCase) to a single form."""
     if not s:
         return ""
     return _PHASE_ALIASES.get(s.lower(), s.lower())
 
 
-# --- 退出码 -----------------------------------------------------------------
+# --- Exit codes -------------------------------------------------------------
 
 
 def emit_error(err: EmgError) -> int:
-    """把 `EmgError` 序列化成单行 JSON 写到 stdout，返回非零退出码。
+    """Serialize `EmgError` as a single-line JSON to stdout and return a non-zero exit code.
 
-    每个脚本顶层都用：
+    Every script's top-level uses:
         try:
             ...
         except EmgError as e:
@@ -537,7 +557,7 @@ def emit_error(err: EmgError) -> int:
         "status": err.status,
     }
     print(json.dumps(payload), flush=True)
-    # 401/409 → 2；429 → 3；5xx → 4；其它 → 1
+    # 401/409 → 2; 429 → 3; 5xx → 4; otherwise → 1
     if err.status == 401:
         return 2
     if err.status == 429:
@@ -550,13 +570,14 @@ def emit_error(err: EmgError) -> int:
 
 
 def fetch_market(market_id: int) -> dict:
-    """优先 `/markets/{id}`（含 worknets[]），404 时回落 `/epochs/{id}`。
+    """Try `/markets/{id}` first (includes worknets[]); on 404 fall back to `/epochs/{id}`.
 
-    `/v1/markets/{id}` 自 2026-05-08 deployment 起在生产已存在（见
-    `docs/SKILL_API_LATEST.md` §1.1）；fallback 路径保留以兼容自部署或
-    回滚到旧版本的环境。fallback 后的 EpochInfo 不含 worknets[]，脚本
-    里展示的 worknet 名字会退化到 `id N` —— 调用方应 catch 这种情况并
-    按需另调 `/worknets`。
+    `/v1/markets/{id}` has been live in production since the 2026-05-08
+    deployment (see `docs/SKILL_API_LATEST.md` §1.1); the fallback path is
+    kept for self-hosted deployments or environments rolled back to an older
+    version. The fallback EpochInfo does not include worknets[], so the
+    worknet name shown in scripts degrades to `id N` — callers should catch
+    this case and call `/worknets` separately as needed.
     """
     try:
         return fetch("GET", f"/markets/{market_id}")
@@ -567,11 +588,14 @@ def fetch_market(market_id: int) -> dict:
 
 
 def confirm(prompt: str, *, yes: bool) -> bool:
-    """统一的 confirm-before-irreversible 钩子。
+    """Unified confirm-before-irreversible hook.
 
-    - `yes=True` 时直接放行（CLI 标志 `--yes` 或非交互场景）。
-    - 否则把 prompt 写到 stderr，从 stdin 读取一行；只接受 `y` / `Y`。
-    - stdin 不是 tty 且没传 `--yes` 时返回 False — 调用方应中止。
+    - When `yes=True`, pass through unconditionally (CLI flag `--yes` or
+      non-interactive scenarios).
+    - Otherwise write the prompt to stderr and read one line from stdin;
+      only `y` / `Y` is accepted.
+    - When stdin is not a tty and `--yes` was not supplied, return False —
+      the caller should abort.
     """
     if yes:
         return True

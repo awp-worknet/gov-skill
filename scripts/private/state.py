@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""GET /v1/principals/{me}/state — 当前 epoch 的 chips + per-worknet shares。
+"""GET /v1/principals/{me}/state — chips + per-worknet shares for the current epoch.
 
-签名读取，自动通过 awp-wallet 解析 principal。
+Signed read; principal is auto-resolved via awp-wallet.
 
-    state.py                  # 当前 epoch 自己的 state
-    state.py --principal 0x…  # 替别人查（需要 Manager 委托）
+    state.py                  # your own state for the current epoch
+    state.py --principal 0x…  # query someone else (requires Manager delegation)
 """
 from __future__ import annotations
 

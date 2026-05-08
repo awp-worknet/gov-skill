@@ -1,24 +1,26 @@
 #!/usr/bin/env python3
-"""POST /v1/orders/synthesize — Smart Order Router buy (R8-D)。
+"""POST /v1/orders/synthesize — Smart Order Router buy (R8-D).
 
     synthesize.py --market 6 --worknet 11 --quantity 100 --max-price 0.25 \
                   [--idem-key UUID] [--yes]
 
-获取 `--quantity` 份目标 worknet 的 shares —— 服务端 Smart Order Router
-在两条路径里选最便宜：
+Acquire `--quantity` shares of the target worknet — the server's Smart Order
+Router picks the cheaper of two paths:
 
-  1. 直接吃目标 worknet 的卖单簿
-  2. 拆 1 chip → N 份 shares，把非目标 worknet 的份额按 best-bid 卖掉，
-     合成净成本 = 1 - Σ best_bid(non-target)
+  1. Hit the target worknet's ask book directly.
+  2. Decompose 1 chip → N shares, sell the non-target worknet portions at
+     best-bid; net synthesis cost = 1 - Σ best_bid(non-target).
 
-`--max-price` 是单 share 的最高可接受成本，必须严格在 (0, 1)。服务端
-把 `max_price * quantity` 作为 planner 的总成本上限；超额返回
-`409 BUSINESS_INSUFFICIENT_BALANCE`。
+`--max-price` is the maximum acceptable per-share cost and must be strictly
+in (0, 1). The server uses `max_price * quantity` as the planner's total
+cost cap; exceeding it returns `409 BUSINESS_INSUFFICIENT_BALANCE`.
 
-返回值含 `actual_quantity`（综合两条腿实际成交数量）和 `slippage_quantity`
-（相对计划与执行时活簿的差额）。
+The response includes `actual_quantity` (the actual filled amount across
+both legs) and `slippage_quantity` (the difference between plan and the
+live book at execution time).
 
-幂等性策略与 `POST /v1/orders` 相同（`X-Idempotency-Key` 24h 缓存）。
+Idempotency policy is the same as `POST /v1/orders` (`X-Idempotency-Key`
+24h cache).
 """
 from __future__ import annotations
 
@@ -46,7 +48,7 @@ def main() -> int:
     ap.add_argument("--yes", action="store_true")
     args = ap.parse_args()
 
-    # 客户端预校验，省去服务端 400 含糊错误
+    # Client-side pre-validation, saves a vague 400 from the server
     try:
         qty = Decimal(args.quantity)
     except InvalidOperation:

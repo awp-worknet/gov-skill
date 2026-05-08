@@ -1,7 +1,8 @@
-"""Retry-After header 解析 — delta-seconds + HTTP-date + 异常输入。
+"""Retry-After header parsing — delta-seconds + HTTP-date + bad inputs.
 
-429 响应的自动重试要 honor 服务端的 Retry-After，但又不能信任 misconfig
-的服务端把客户端挂到下个世纪 —— `cap` 上限保护。
+The auto-retry on 429 must honor the server's Retry-After, but cannot trust
+a misconfigured server to park the client in the next century — `cap`
+provides an upper bound.
 """
 
 from datetime import datetime, timedelta, timezone
@@ -26,7 +27,7 @@ def test_negative_clamped_to_zero():
 
 
 def test_above_cap_clamped():
-    # 服务端瞎发 99999 秒，要被 cap=60 截断
+    # The server emits a nonsense 99999 seconds; this must be capped at 60
     assert _parse_retry_after("99999") == 60.0
     assert _parse_retry_after("99999", cap=10.0) == 10.0
 
@@ -47,7 +48,7 @@ def test_http_date_in_future_parsed():
     # RFC 7231 § 7.1.1.1 IMF-fixdate
     header = future.strftime("%a, %d %b %Y %H:%M:%S GMT")
     parsed = _parse_retry_after(header)
-    # 允许 ±2s 漂移（解析期间过的时间）
+    # Allow ±2s drift (time elapsed during parsing)
     assert 18.0 <= parsed <= 22.0
 
 

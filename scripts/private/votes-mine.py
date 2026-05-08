@@ -1,15 +1,16 @@
 #!/usr/bin/env python3
-"""GET /v1/principals/{me}/votes/{market_id} — 自己在某 market 的最终揭票。
+"""GET /v1/principals/{me}/votes/{market_id} — your own revealed vote for a given market.
 
     votes-mine.py --market 6
-    votes-mine.py --market 6 --principal 0x…   # Manager 代查（需委托）
+    votes-mine.py --market 6 --principal 0x…   # Manager-on-behalf-of (requires delegation)
 
-返回 `RevealedVote` —— vote 向量 + prediction 向量 + nonce + signature。
-self-only：path principal 必须等于认证 principal，否则 401
-`AUTH_UNAUTHORIZED_DELEGATE`。
+Returns a `RevealedVote` — vote vector + prediction vector + nonce + signature.
+self-only: the path principal must equal the authenticated principal, else
+401 `AUTH_UNAUTHORIZED_DELEGATE`.
 
-reveal-gated：phase 1/2 期间返回 403 `STATE_VOTES_NOT_REVEALED`，要等
-Phase 2→3 boundary 触发后（settlement 开始）才能读自己的 final 票面。
+reveal-gated: during phase 1/2, returns 403 `STATE_VOTES_NOT_REVEALED`; you
+have to wait for the Phase 2→3 boundary (settlement starting) before reading
+your own final ballot.
 """
 from __future__ import annotations
 

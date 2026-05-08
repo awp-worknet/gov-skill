@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
-"""列出 markets / 取单个 market 详情。
+"""List markets / fetch a single market's detail.
 
-`/v1/markets` 自 2026-05-08 deployment 起在生产已上线，不再需要
-`/v1/epochs/current` fallback。
+`/v1/markets` has been live in production since the 2026-05-08 deployment;
+the `/v1/epochs/current` fallback is no longer needed.
 
-    markets.py                 # 列出所有 markets
-    markets.py --id 6          # 单个 market 的 worknets[] 详情
-    markets.py --status voting_and_trading   # 按 phase 过滤
+    markets.py                 # list all markets
+    markets.py --id 6          # single market's worknets[] detail
+    markets.py --status voting_and_trading   # filter by phase
 
-输出统一是 `{ items: [...] }`（list 模式）或单个对象（--id 模式）。
+Output is uniformly `{ items: [...] }` (list mode) or a single object
+(--id mode).
 """
 from __future__ import annotations
 

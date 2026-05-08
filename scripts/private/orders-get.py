@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""GET /v1/orders/{id} — 单个订单详情 + fills[] + avg_fill_price。
+"""GET /v1/orders/{id} — single-order detail + fills[] + avg_fill_price.
 
     orders-get.py --id 018f-….
 """

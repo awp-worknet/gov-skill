@@ -1,19 +1,22 @@
-"""查询字符串规范化 + EIP-712 字节级原语 — 镜像 crates/emg-auth/src/canonical.rs。
+"""Query string canonicalization + EIP-712 byte-level primitives — mirrors crates/emg-auth/src/canonical.rs.
 
-签名前必须把 query 规范化为：
-1. 按 RFC 3986 percent-decode 每个键值对的两侧。
-2. 按 (key, value) 升序排序。
-3. 按 RFC 3986 component encoding 重新 percent-encode（小写十六进制）。
-4. 用 `&` 拼回，键值之间用 `=`，没有 query 时返回空串。
+Before signing, the query string must be canonicalized as follows:
+1. Percent-decode both sides of every key/value pair per RFC 3986.
+2. Sort by (key, value) ascending.
+3. Re-percent-encode using RFC 3986 component encoding (lowercase hex).
+4. Join with `&`, separating key from value with `=`; an empty query returns the empty string.
 
-服务端把签名材料里的 `query` 字段当成上述规范化结果。任何漂移都会导致
-`AUTH_SIGNATURE_INVALID`，所以这里逐字节复刻 Rust 实现，并在 tests/
-里跑相同的已知答案向量验证。
+The server treats the `query` field of the signing material as exactly the
+canonicalized result above. Any drift causes `AUTH_SIGNATURE_INVALID`, so
+this file replicates the Rust implementation byte for byte and runs the same
+known-answer vectors under tests/ to verify.
 
-另外暴露 `rust_decimal_serialize` — 投票内层 `EMGVote.voteHash` 需要把
-向量先按 `rust_decimal::Decimal::serialize` 的 16 字节二进制格式打包，
-再拼上 4 字节 LE u32 length prefix 后做 keccak256。两端字节漂移就拿不
-到匹配的 hash，整个投票会被服务端 ecrecover 拒掉。
+Also exposed: `rust_decimal_serialize` — the inner-vote `EMGVote.voteHash`
+requires packing the vector first into the 16-byte binary format used by
+`rust_decimal::Decimal::serialize`, then prefixing a 4-byte LE u32 length and
+running keccak256 over the result. Any byte-level drift between the two
+sides means we can't produce a matching hash, and the entire vote is rejected
+by the server's ecrecover.
 """
 
 from __future__ import annotations
@@ -23,24 +26,25 @@ import struct
 from decimal import Decimal
 from typing import List, Sequence, Tuple
 
-# eth_hash 是同步 keccak256 的零依赖封装，pyproject 里固定了 0.7+。
+# eth_hash is a zero-dependency keccak256 wrapper; pyproject pins 0.7+.
 from eth_hash.auto import keccak as _keccak
 
 
 class CanonicalError(ValueError):
-    """规范化失败 — 截断的 percent 转义、非十六进制字符或非 UTF-8 字节。"""
+    """Canonicalization failed — truncated percent escape, non-hex character, or non-UTF-8 bytes."""
 
 
 def keccak256(data: bytes) -> bytes:
-    """返回 32 字节 Keccak-256 摘要。空输入也返回 32 字节摘要。"""
+    """Returns a 32-byte Keccak-256 digest. Empty input also returns a 32-byte digest."""
     return _keccak(data)
 
 
 def eip712_body_hash(body: bytes) -> bytes:
-    """EIP-712 信封里的 `bodyHash` 字段。
+    """The `bodyHash` field for the EIP-712 envelope.
 
-    空 body 返回 32 字节零（与服务端 `B256::ZERO` 哨兵一致），非空 body
-    返回 `keccak256(body)`。**不要** 用 SHA-256；幂等性 cache 才用 SHA-256。
+    Empty body returns 32 bytes of zero (matching the server's `B256::ZERO`
+    sentinel); non-empty body returns `keccak256(body)`. **Do not** use SHA-256;
+    SHA-256 is reserved for idempotency caching.
     """
     if not body:
         return b"\x00" * 32
@@ -48,18 +52,20 @@ def eip712_body_hash(body: bytes) -> bytes:
 
 
 def idempotency_body_hash(body: bytes) -> str:
-    """SHA-256 摘要，与 EIP-712 的 keccak256 严格区分（spec §9.4 步骤 1）。
+    """SHA-256 digest, strictly distinct from the EIP-712 keccak256 (spec §9.4 step 1).
 
-    **当前 skill 不直接调用本函数** —— 服务端用此摘要作为 idempotency
-    cache key 的一部分（`(Principal, X-Idempotency-Key, sha256(body))`），
-    客户端只需要原样复发同一个 body 即可命中缓存，不必自己算 hash。
+    **The skill itself does not call this function** — the server uses this
+    digest as part of the idempotency cache key
+    (`(Principal, X-Idempotency-Key, sha256(body))`); the client only needs
+    to re-send the same body verbatim to hit the cache, no client-side hashing
+    required.
 
-    保留这个函数是因为：
-      - spec §9.4 把它列为客户端"应当能算"的 reference 实现
-      - tests/test_canonical.py 用它锚定服务端兼容性（防止未来误把
-        keccak256 当成 idempotency hash —— 两个用不同算法是 spec 反复
-        强调的反混淆点）
-      - 将来如果加 client-side dedup / replay-protection 工具，可以直接复用
+    This function is kept because:
+      - spec §9.4 lists it as a reference implementation the client "should be able to compute"
+      - tests/test_canonical.py uses it to anchor server compatibility (preventing
+        a future mistake where keccak256 is used as the idempotency hash —
+        keeping the two algorithms distinct is the spec's repeated anti-confusion point)
+      - if we ever add client-side dedup / replay-protection tooling, it can reuse this directly
     """
     return "0x" + hashlib.sha256(body).hexdigest()
 
@@ -83,9 +89,10 @@ def _hex_value(c: int) -> int:
 
 
 def _percent_decode(s: str) -> str:
-    # Rust 实现里输入是 &str.as_bytes() — 即 UTF-8 字节流。Python 这边先把
-    # str encode 成 UTF-8，让裸 unicode 字符（比如 'ä'）按字节走，再解析
-    # percent-escape 字节，最后整体 decode 回 utf-8 字符串。
+    # The Rust implementation operates on &str.as_bytes() — i.e. a UTF-8 byte
+    # stream. Here in Python we first encode str to UTF-8 so raw unicode
+    # characters (e.g. 'ä') travel as bytes; then parse percent-escape bytes;
+    # then decode the whole thing back to a utf-8 string.
     raw = s.encode("utf-8")
     out = bytearray()
     i = 0
@@ -119,10 +126,11 @@ def _percent_encode(s: str) -> str:
 
 
 def canonicalize_query(query: str) -> str:
-    """规范化查询字符串。空输入或只有 `?` 返回 ``""``。
+    """Canonicalize the query string. Empty input or just `?` returns ``""``.
 
-    重要：`+` 视为字面量加号（编码为 `%2b`），不要套用 form-urlencoded 的
-    "加号即空格" 语义。规则与服务端 `crates/emg-auth/src/canonical.rs` 完全对齐。
+    Important: `+` is treated as a literal plus sign (encoded as `%2b`); do
+    NOT apply form-urlencoded "plus means space" semantics. Rules align
+    exactly with the server's `crates/emg-auth/src/canonical.rs`.
     """
     if query.startswith("?"):
         query = query[1:]
@@ -141,28 +149,31 @@ def canonicalize_query(query: str) -> str:
 
 
 def rust_decimal_serialize(d: Decimal) -> bytes:
-    """复刻 `rust_decimal::Decimal::serialize` 的 16 字节小端二进制 layout。
+    """Replicate the 16-byte little-endian binary layout of `rust_decimal::Decimal::serialize`.
 
-    实际字节顺序（与 paupino/rust-decimal 1.x 的 `serialize()` 对齐，已用
-    真 Rust 程序在 cargo 1.94 上交叉验证）：
-        bytes[0..4]   = flags (u32 LE)：bits 16..23 = scale (0..28)，bit 31 = sign
-        bytes[4..8]   = lo    (mantissa 低 32 位)
-        bytes[8..12]  = mid   (mantissa 中 32 位)
-        bytes[12..16] = hi    (mantissa 高 32 位)
+    Actual byte order (matches paupino/rust-decimal 1.x's `serialize()`,
+    cross-validated against a real Rust program on cargo 1.94):
+        bytes[0..4]   = flags (u32 LE): bits 16..23 = scale (0..28), bit 31 = sign
+        bytes[4..8]   = lo    (mantissa low 32 bits)
+        bytes[8..12]  = mid   (mantissa middle 32 bits)
+        bytes[12..16] = hi    (mantissa high 32 bits)
 
-    `Decimal("0.5").serialize()` 在 Rust 端给出 `00000100 05000000 …`
-    —— flags 在最前面，**不是** 最后。早期版本的实现把它写反了，votes
-    会被服务端 ecrecover 全部拒掉。
+    `Decimal("0.5").serialize()` on the Rust side produces `00000100 05000000 …`
+    — flags first, **not** last. Earlier implementations had it reversed and
+    every vote was rejected by the server's ecrecover.
 
-    rust_decimal 的 mantissa 是无符号 96-bit，scale 描述小数点左移位数。
-    Python `Decimal.as_tuple()` 给出 `(sign, digits, exponent)`，把 digits
-    拼成整数即得 mantissa；scale = -exponent（要在 [0, 28] 范围）。
+    rust_decimal's mantissa is unsigned 96-bit; scale describes how many
+    digits to shift left of the decimal point. Python `Decimal.as_tuple()`
+    gives `(sign, digits, exponent)`; concatenating the digits as an integer
+    yields the mantissa; scale = -exponent (must be in [0, 28]).
 
-    特殊处理：负零 `-0` 在 rust_decimal 内部归一化为正零（mantissa==0 时
-    丢弃 sign bit），我们在编码时同样归一化，避免与服务端 hash 漂移。
+    Special case: negative zero `-0` is normalized to positive zero in
+    rust_decimal (when mantissa==0 the sign bit is dropped); we normalize the
+    same way in encoding to avoid hash drift versus the server.
 
-    与 ASCII 文本格式严格不同 —— 这是投票 voteHash / predictionHash 的
-    字节级合约，**不可以** 用 `format(d, 'f').encode()` 替代。
+    Strictly distinct from any ASCII text format — this is the byte-level
+    contract for a vote's voteHash / predictionHash, and **must not** be
+    replaced with `format(d, 'f').encode()`.
     """
     sign, digits, exponent = d.as_tuple()
     if exponent in ("F", "n", "N"):
@@ -181,17 +192,17 @@ def rust_decimal_serialize(d: Decimal) -> bytes:
     mid = (mantissa >> 32) & 0xFFFFFFFF
     hi = (mantissa >> 64) & 0xFFFFFFFF
     flags = (scale & 0xFF) << 16
-    # rust_decimal 把 -0 归一化为 +0；mantissa==0 时 sign bit 必须置 0
+    # rust_decimal normalizes -0 to +0; when mantissa==0, the sign bit must be 0
     if sign and mantissa != 0:
         flags |= 0x80000000
     return struct.pack("<IIII", flags, lo, mid, hi)
 
 
 def canonical_decimal_vector(vec: Sequence[Decimal]) -> bytes:
-    """`canonical_bytes(VoteVector)` — 4 字节 LE u32 length + N × rust_decimal 16 字节。
+    """`canonical_bytes(VoteVector)` — 4-byte LE u32 length + N × 16-byte rust_decimal.
 
-    服务端 `crates/emg-core/src/canonical_vote.rs` 的等价实现。
-    `keccak256(canonical_decimal_vector(vec))` 即 EMGVote.voteHash 字段。
+    Equivalent to the server's `crates/emg-core/src/canonical_vote.rs`.
+    `keccak256(canonical_decimal_vector(vec))` is the EMGVote.voteHash field.
     """
     out = bytearray()
     out += struct.pack("<I", len(vec))
@@ -201,10 +212,10 @@ def canonical_decimal_vector(vec: Sequence[Decimal]) -> bytes:
 
 
 def build_query(params: dict) -> str:
-    """从 dict 构造规范化查询字符串。值为 ``None`` 的键被跳过。
+    """Build a canonicalized query string from a dict. Keys whose value is ``None`` are skipped.
 
-    用于 GET 请求 — 既要把 query 拼到 URL 后面发送，也要喂给签名函数。
-    返回值不含前导 `?`。
+    Used for GET requests — the same query string is appended to the URL and
+    fed to the signing function. Returned value does not include a leading `?`.
     """
     if not params:
         return ""

@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
-"""POST /v1/positions/split — 把 chips 切成 N 份 worknet shares。
+"""POST /v1/positions/split — split chips into N worknet shares.
 
     split.py --market 6 --quantity 10 [--idem-key UUID] [--yes]
 
-Polymarket-style: 1 chip → N 份 shares（每个 worknet 一份）。无对手方。
-返回更新后的 `StakerEpochState`。
+Polymarket-style: 1 chip → N shares (one per worknet). No counterparty.
+Returns the updated `StakerEpochState`.
 
-`market_id` 是 per-market 操作（chips 与 shares 都按 market 分账），所以
-body 显式带 market。OpenAPI 没把 market_id 标 required，但服务端实际验
-证（与 submit-order 一致的 spec-lag 模式）。
+`market_id` is per-market (both chips and shares are accounted per market),
+so the body explicitly includes market. OpenAPI does not mark market_id
+required, but the server actually validates it (same spec-lag pattern as
+submit-order).
 """
 from __future__ import annotations
 

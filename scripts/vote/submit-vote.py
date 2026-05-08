@@ -1,31 +1,36 @@
 #!/usr/bin/env python3
-"""POST /v1/epochs/{market_id}/votes — 提交私密投票（latest_2026_05 形态）。
+"""POST /v1/epochs/{market_id}/votes — submit a private vote (latest_2026_05 shape).
 
     submit-vote.py --market 6 \
                    --vote "0.5,0.3,0.2,0,0,0,0" \
                    --prediction "0.5,0.3,0.2,0,0,0,0" \
                    [--vote-revision 1] [--idem-key UUID] [--yes]
 
-`--vote` 和 `--prediction` 都是 `,` 分隔的 string-decimal，按 worknet
-position 顺序排列。简单形约束 `|Σ − 1| ≤ 1e-9`（D2 / mig 0047）。
+`--vote` and `--prediction` are both `,`-separated string-decimal values
+arranged in worknet position order. Simplex constraint: `|Σ − 1| ≤ 1e-9`
+(D2 / mig 0047).
 
-需要两个签名：
-  1. 内层 EMGVote — `latest_2026_05` 形态：
+Two signatures are required:
+  1. Inner EMGVote — `latest_2026_05` shape:
         principal, market_id, vote_revision, vote_hash, prediction_hash, timestamp
-     `GOVNET_VOTE_TYPED_DATA_VARIANT` 可切到 main_spec / openapi 旧形态。
-  2. 外层 EMGRequest — 标准 transport 信封。
+     `GOVNET_VOTE_TYPED_DATA_VARIANT` can switch to the legacy main_spec / openapi shapes.
+  2. Outer EMGRequest — standard transport envelope.
 
-`--vote-revision` 在每个 (principal, market) 范围内严格递增；首次提交 1，
-重投递增 +1。生产服务端用 vote_revision 取代旧的 vote-level `nonce` 字段
-(2026-05-08 deployment 后)。`/v1/principals/{p}/votes/{m}` 仅 reveal 后
-可读，无 in-progress 查询接口，所以 vote_revision 必须客户端自跟。
+`--vote-revision` is strictly ascending within each (principal, market) scope;
+first submit is 1, re-vote increments by +1. The production server replaces
+the legacy vote-level `nonce` field with vote_revision (post-2026-05-08
+deployment). `/v1/principals/{p}/votes/{m}` is only readable after reveal —
+there is no in-progress query endpoint — so vote_revision must be tracked
+client-side.
 
-⚠️ 投票一旦提交不可撤回。要修改投票必须用更高的 vote_revision 重新提
-交，仅最高 revision 那一份会进入 Merkle 树（其它历史可在结算后通过
-`/v1/epochs/{id}/votes/{principal}/history` 审计）。
+Warning: a vote, once submitted, cannot be retracted. To change a vote, you
+must resubmit with a HIGHER vote_revision; only the highest revision enters
+the Merkle tree (other history can be audited after settlement via
+`/v1/epochs/{id}/votes/{principal}/history`).
 
-旧 `--epoch` / `--vote-nonce` 仍可用作 alias，向后兼容已有调用方；
-新调用方应该用 `--market` / `--vote-revision`。
+Legacy `--epoch` / `--vote-nonce` are still accepted as aliases for
+backward compatibility with existing callers; new callers should use
+`--market` / `--vote-revision`.
 """
 from __future__ import annotations
 
@@ -45,7 +50,7 @@ from lib.sign import sign_emg_vote  # noqa: E402
 
 getcontext().prec = 40
 
-# 服务端 D2 / mig 0047: 简单形容差 |Σ − 1| ≤ 1e-9（应用层 + DB CHECK 都校验）
+# Server D2 / mig 0047: simplex tolerance |Σ − 1| ≤ 1e-9 (validated at both the application layer and DB CHECK)
 _SIMPLEX_TOLERANCE = Decimal("0.000000001")
 
 
@@ -78,13 +83,13 @@ def _validate_simplex(vec: List[Decimal], label: str) -> None:
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    # market_id / epoch 都接受，至少给一个
+    # Both market_id / epoch are accepted; at least one is required
     ap.add_argument("--market", type=int, help="market_id (preferred name)")
     ap.add_argument("--epoch", type=int, help="alias for --market (legacy)")
     ap.add_argument("--vote", required=True, help="comma-separated probabilities")
     ap.add_argument("--prediction", required=True, help="comma-separated probabilities")
-    # vote_revision: 每个 (principal, market) 范围内严格递增；服务端 EMGVote
-    # typed-data 字段 vote_revision (uint64)。旧 --vote-nonce 是 alias。
+    # vote_revision: strictly ascending within each (principal, market) scope; the
+    # server's EMGVote typed-data field is vote_revision (uint64). --vote-nonce is a legacy alias.
     ap.add_argument("--vote-revision", type=int, default=None,
                     help="per-market revision counter (1, 2, ... strictly ascending); default 1")
     ap.add_argument("--vote-nonce", type=int, default=None,
@@ -119,7 +124,7 @@ def main() -> int:
             f"     prediction:    [{', '.join(format(v, 'f') for v in pred)}]\n"
             f"     vote_revision: {revision}\n"
             f"     idem-key:      {args.idem_key}\n"
-            "     ⚠️  Votes are FINAL — to change, resubmit with HIGHER vote_revision.\n"
+            "     WARNING: Votes are FINAL — to change, resubmit with HIGHER vote_revision.\n"
             "     proceed? (y/n) "
         )
         if not confirm(prompt, yes=args.yes):
@@ -130,7 +135,7 @@ def main() -> int:
         from lib.govnet_lib import get_auth_info
         auth_info = get_auth_info()
 
-        # latest_2026_05 EMGVote 必传 timestamp；旧形态会忽略
+        # latest_2026_05 EMGVote requires timestamp; legacy shapes ignore it
         timestamp = int(time.time())
 
         vote_hash = keccak256(canonical_decimal_vector(vote))
@@ -144,11 +149,12 @@ def main() -> int:
             timestamp=timestamp,
             auth_info=auth_info,
         )
-        # OpenAPI SignedVoteRequest 显式列出的字段：vote / prediction /
-        # nonce / signature。服务端把 body.nonce 内部 map 到新模型的
-        # vote_revision；客户端只发 spec 声明的字段，避免 strict-validation
-        # 服务端拒掉 unknown `vote_revision`。`vote_revision` 仍然出现在
-        # EMGVote typed-data 里 —— 那是签名材料，不是 body 字段。
+        # The fields OpenAPI's SignedVoteRequest explicitly lists: vote / prediction /
+        # nonce / signature. The server internally maps body.nonce to the new model's
+        # vote_revision; the client only sends spec-declared fields to prevent a
+        # strict-validation server from rejecting the unknown `vote_revision` field.
+        # `vote_revision` still appears in the EMGVote typed-data — but that's
+        # signing material, not a body field.
         body = {
             "vote": [format(v, "f") for v in vote],
             "prediction": [format(v, "f") for v in pred],

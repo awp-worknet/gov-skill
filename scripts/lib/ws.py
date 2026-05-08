@@ -1,22 +1,23 @@
-"""JSON-RPC over WebSocket — `subscribe` + `auth.hello` + 事件分发。
+"""JSON-RPC over WebSocket — `subscribe` + `auth.hello` + event dispatch.
 
-使用方式：
+Usage:
 
     async with WSClient() as ws:
-        await ws.auth_hello(principal=..., auth_info=...)   # 私有频道才需要
+        await ws.auth_hello(principal=..., auth_info=...)   # only needed for private channels
         await ws.subscribe(["book.6.10", "klines.6.10.1m"])
         async for event in ws:
-            json.dumps(event, ...)  # 每行一个事件
+            json.dumps(event, ...)  # one event per line
 
-关键约定（曾经把 frontend 卡了两个月）：
+Key conventions (these once blocked frontend for two months):
 
-- subscribe 的 param 键是 `channels`，**不是** `topics`。
-- 服务端推送的字段是 `params.channel`，**不是** `params.topic`。
-- 私有频道 (`fills.me` / `orders.me`) 必须先发 `auth.hello`，否则订阅
-  返回 `AUTH_SESSION_REQUIRED`。
+- The subscribe param key is `channels`, **not** `topics`.
+- Server-pushed messages use `params.channel`, **not** `params.topic`.
+- Private channels (`fills.me` / `orders.me`) require `auth.hello` first;
+  otherwise the subscription returns `AUTH_SESSION_REQUIRED`.
 
-`auth.hello` 的签名 `path` 字段是 `/v1/ws`（不去 `/v1` 前缀）— WS handler
-读取的是 hardcoded literal，与 REST 的 `Router::nest` strip 行为不同。
+`auth.hello`'s signing material has `path` set to `/v1/ws` (the `/v1` prefix
+is *not* stripped) — the WS handler reads a hardcoded literal, unlike REST
+where `Router::nest` strips the prefix.
 """
 
 from __future__ import annotations
@@ -50,11 +51,11 @@ class WSError(RuntimeError):
 
 
 class WSClient:
-    """轻量 JSON-RPC 客户端，专为脚本里 long-running 订阅设计。
+    """Lightweight JSON-RPC client, designed for long-running subscriptions in scripts.
 
-    - `id` 单调递增。
-    - `subscribe()` 阻塞等待对应 `id` 的 ack；其它消息暂存到内部队列。
-    - 迭代器只产出 server-pushed notification（`method` 存在且 `id` 不存在）。
+    - `id` is monotonically increasing.
+    - `subscribe()` blocks waiting for the matching `id` ack; other messages go to an internal queue.
+    - The iterator only yields server-pushed notifications (where `method` is present and `id` is not).
     """
 
     def __init__(self, url: Optional[str] = None) -> None:
@@ -68,8 +69,9 @@ class WSClient:
         self._closed = False
 
     async def __aenter__(self) -> "WSClient":
-        # `ping_interval` 让 websockets 库定期发 control-frame ping，
-        # 服务端 60s 空闲会断开 — 我们用 25s 间隔保活。
+        # `ping_interval` lets the websockets library send periodic control-frame
+        # pings; the server disconnects after 60s of idle, so we keep alive
+        # with a 25s interval.
         self._ws = await websockets.connect(self.url, ping_interval=25, ping_timeout=10)
         self._reader_task = asyncio.create_task(self._reader())
         return self
@@ -78,7 +80,8 @@ class WSClient:
         self._closed = True
         if self._reader_task:
             self._reader_task.cancel()
-            # 等 reader 真正退出再关 socket，避免长 async 程序里留 unjoined task
+            # Wait for the reader to actually exit before closing the socket,
+            # to avoid leaving an unjoined task in long-running async programs
             try:
                 await self._reader_task
             except (asyncio.CancelledError, Exception):
@@ -134,7 +137,7 @@ class WSClient:
             )
         return resp.get("result")
 
-    # --- 高层 API -----------------------------------------------------------
+    # --- High-level API -----------------------------------------------------
 
     async def auth_hello(
         self,
@@ -145,16 +148,18 @@ class WSClient:
         timestamp: Optional[int] = None,
         actor: Optional[str] = None,
     ) -> Dict:
-        """私有频道前置握手。签名材料里 `method=WS_HELLO`、`path=/v1/ws`。
+        """Pre-handshake for private channels. Signing material has `method=WS_HELLO`, `path=/v1/ws`.
 
-        params 必须把签名材料的全部七个字段都带上 — asyncapi 只把
-        `principal/nonce/timestamp/signature` 标 required，但 MAIN-SPEC §4.3
-        的示例同时给出 `method/path/query/bodyHash`，这是服务端做 ecrecover
-        时重建 EIP-712 摘要的必要输入。如果服务端是从 params 读这四个值
-        而不是硬编码常量，缺字段就会一律 `AUTH_SIGNATURE_INVALID`。
+        params must include all seven fields of the signing material — asyncapi
+        only marks `principal/nonce/timestamp/signature` as required, but
+        MAIN-SPEC §4.3's example also shows `method/path/query/bodyHash`,
+        which are necessary inputs the server uses to rebuild the EIP-712
+        digest during ecrecover. If the server reads those four values from
+        params instead of using hardcoded constants, omitting them will
+        always produce `AUTH_SIGNATURE_INVALID`.
         """
         ts = timestamp if timestamp is not None else int(time.time())
-        # WS handshake 的 path 走完整 `/v1/ws`，与 REST POST-strip 行为不同
+        # WS handshake's path is the full `/v1/ws`, unlike REST POST-strip behavior
         typed_data = build_emg_request_typed_data(
             principal=principal,
             method="WS_HELLO",
@@ -187,18 +192,19 @@ class WSClient:
         since_sequence: Optional[int] = None,
         allow_partial: bool = False,
     ) -> Dict:
-        """订阅一组频道。**param 键是 `channels`** — 不是 `topics`。
+        """Subscribe to a set of channels. **The param key is `channels`** — not `topics`.
 
-        重要：JSON-RPC 顶层永远成功（无 `error` 字段），per-channel 的拒绝
-        通过 `result.failed[]` 上报，常见 code:
-            CHANNEL_NOT_FOUND       — 频道字符串不匹配任何 8 个支持模式
-            CHANNEL_INVALID_FIELD   — 模式对了但字段非法
-            AUTH_SESSION_REQUIRED   — 未做 auth.hello 就订阅 fills.me 等
-            SEQUENCE_TOO_OLD        — since_sequence 超出 WAL 保留窗口
-            RATE_LIMIT_EXCEEDED     — 单连接订阅速率限制
+        Important: the JSON-RPC top level always succeeds (no `error` field);
+        per-channel rejections are reported via `result.failed[]`. Common codes:
+            CHANNEL_NOT_FOUND       — channel string didn't match any of the 8 supported patterns
+            CHANNEL_INVALID_FIELD   — pattern matched but a field was invalid
+            AUTH_SESSION_REQUIRED   — subscribed to fills.me etc. without auth.hello
+            SEQUENCE_TOO_OLD        — since_sequence is outside the WAL retention window
+            RATE_LIMIT_EXCEEDED     — single-connection subscription rate limit
 
-        默认所有 failed 都触发 `WSError`；调用方传 `allow_partial=True` 只
-        关心成功订阅时，则把 failed 放到返回 dict 让上层自己决定。
+        By default any failed item triggers `WSError`; passing `allow_partial=True`
+        when the caller only cares about successful subscriptions returns the
+        failed list in the response so the caller can decide.
         """
         params: Dict[str, Any] = {"channels": list(channels)}
         if since_sequence is not None:
@@ -222,23 +228,24 @@ class WSClient:
         return await self._call("ping", {}, timeout=5.0)
 
     async def __aiter__(self) -> AsyncIterator[Dict]:
-        """产出 server-pushed notifications（无 `id` 字段）。"""
+        """Yields server-pushed notifications (those without an `id` field)."""
         while not self._closed:
             try:
                 yield await self._notif_queue.get()
             except asyncio.CancelledError:
                 break
 
-    # --- 底层送任意消息（用于 batch 等扩展） --------------------------------
+    # --- Low-level send for arbitrary messages (for batch and similar extensions) ---
 
     async def send_raw(self, envelope: Dict) -> None:
         await self._ws.send(json.dumps(envelope))
 
 
 def emit_event(event: Dict) -> None:
-    """把订阅事件序列化成单行 JSON 写到 stdout（JSON-Lines 流）。
+    """Serialize a subscription event as a single line of JSON to stdout (JSON-Lines stream).
 
-    脚本入口 `for event in ws:` 之后直接调用本函数 — 调用方 agent 可
-    以增量解析，不必等流结束。
+    A script's entry point typically calls this directly inside `for event in ws:`
+    — the calling agent can incrementally parse and doesn't need to wait for
+    the stream to close.
     """
     print(json.dumps(event, separators=(",", ":")), flush=True)
