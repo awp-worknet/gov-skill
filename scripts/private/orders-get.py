@@ -22,7 +22,7 @@ def main() -> int:
         data = signed_request(
             "GET",
             sign_path=f"/orders/{args.id}",
-            full_path=f"/v1/orders/{args.id}",
+            full_path=f"/orders/{args.id}",
         )
     except EmgError as e:
         return emit_error(e)

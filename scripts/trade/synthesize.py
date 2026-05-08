@@ -85,7 +85,7 @@ def main() -> int:
         data = signed_request(
             "POST",
             sign_path="/orders/synthesize",
-            full_path="/v1/orders/synthesize",
+            full_path="/orders/synthesize",
             body=body,
             idempotency_key=args.idem_key,
         )

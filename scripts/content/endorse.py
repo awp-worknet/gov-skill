@@ -29,7 +29,7 @@ def main() -> int:
         data = signed_request(
             "POST",
             sign_path=f"/comments/{args.id}/endorse",
-            full_path=f"/v1/comments/{args.id}/endorse",
+            full_path=f"/comments/{args.id}/endorse",
             body=None,
         )
     except EmgError as e:

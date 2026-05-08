@@ -39,7 +39,7 @@ def main() -> int:
     try:
         data = fetch(
             "GET",
-            f"/v1/markets/{args.market}/worknets/{args.worknet}/klines",
+            f"/markets/{args.market}/worknets/{args.worknet}/klines",
             params=params,
         )
     except EmgError as e:

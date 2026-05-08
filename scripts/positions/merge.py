@@ -1,10 +1,13 @@
 #!/usr/bin/env python3
 """POST /v1/positions/merge — 把 N 份 shares 合并回 chips。
 
-    merge.py --quantity 5 [--idem-key UUID] [--yes]
+    merge.py --market 6 --quantity 5 [--idem-key UUID] [--yes]
 
 需要每个 worknet 都至少持有 `quantity` 份 shares — 否则服务端返回
 `BUSINESS_INSUFFICIENT_SHARES`（HTTP 409）。
+
+`market_id` 是 per-market 操作；OpenAPI 没把它标 required，但服务端实际
+验证（与 submit-order / split 一致的 spec-lag 模式）。
 """
 from __future__ import annotations
 
@@ -20,6 +23,7 @@ from lib.govnet_lib import EmgError, confirm, emit_error, signed_request, fmt_am
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("--market", type=int, required=True)
     ap.add_argument("--quantity", required=True)
     ap.add_argument("--idem-key", default=str(uuid.uuid4()))
     ap.add_argument("--yes", action="store_true")
@@ -27,6 +31,7 @@ def main() -> int:
 
     prompt = (
         "[TX] merge shares → chips:\n"
+        f"     market:     {args.market}\n"
         f"     quantity:   {fmt_amount(args.quantity)} shares per worknet\n"
         f"     idem-key:   {args.idem_key}\n"
         "     proceed? (y/n) "
@@ -39,8 +44,8 @@ def main() -> int:
         data = signed_request(
             "POST",
             sign_path="/positions/merge",
-            full_path="/v1/positions/merge",
-            body={"quantity": args.quantity},
+            full_path="/positions/merge",
+            body={"market_id": args.market, "quantity": args.quantity},
             idempotency_key=args.idem_key,
         )
     except EmgError as e:

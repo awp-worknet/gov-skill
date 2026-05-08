@@ -26,7 +26,7 @@ def main() -> int:
         # 该端点在 OpenAPI 里标记 `security: []`（公开读），所以不签名
         data = fetch(
             "GET",
-            f"/v1/principals/{principal}/power",
+            f"/principals/{principal}/power",
             params={"epoch_id": args.epoch},
         )
     except EmgError as e:

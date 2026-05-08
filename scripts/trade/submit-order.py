@@ -28,6 +28,7 @@ from lib.govnet_lib import (  # noqa: E402
     EmgError,
     confirm,
     emit_error,
+    fetch,
     fetch_market,
     fmt_amount,
     fmt_price,
@@ -38,7 +39,7 @@ from lib.govnet_lib import (  # noqa: E402
 
 
 def _phase_check(market_id: int) -> dict:
-    """先尝试 /v1/markets/{id}（含 worknets[]），失败时退到 /v1/epochs/{id}。
+    """先尝试 `/markets/{id}`（含 worknets[]），失败时退到 `/epochs/{id}`。
 
     EpochInfo 用 `phase` 字段，Market schema 可能用 `status` —— 都试。
     """
@@ -51,6 +52,45 @@ def _phase_check(market_id: int) -> dict:
             status=409,
         )
     return market
+
+
+def _power_check(principal: str, market_id: int) -> None:
+    """下单前先确认 principal 在本 epoch 有 AWP Power。
+
+    生产服务端对 zero-power 用户下单当前会返回 500
+    `INTERNAL_UNEXPECTED_STATE: principal not initialized before reserve_for_buy`
+    （server-side bug，应该是 404 STATE_PRINCIPAL_NOT_IN_EPOCH）。客户端
+    先 GET /principals/{me}/power 拦下来，给用户友好提示，避免烧 nonce
+    + 看到看不懂的 500。
+    """
+    try:
+        power = fetch("GET", f"/principals/{principal}/power",
+                     params={"epoch_id": market_id})
+    except EmgError as e:
+        # 404 直接转译；其它错误透传不要遮蔽
+        if e.status == 404:
+            raise EmgError(
+                "STATE_PRINCIPAL_NOT_IN_EPOCH",
+                f"No AWP Power for principal in market {market_id}. "
+                "AWP Power is snapshotted every Wednesday 12:00 UTC. "
+                "Stake AWP into a veAWP position via awp-skill, then wait "
+                "for the next epoch open for the snapshot to take effect.",
+                status=404,
+            )
+        raise
+    total = power.get("total_voting_power") or "0"
+    try:
+        from decimal import Decimal
+        if Decimal(str(total)) <= 0:
+            raise EmgError(
+                "STATE_PRINCIPAL_NOT_IN_EPOCH",
+                f"AWP Power for market {market_id} is {total} — no chips this epoch. "
+                "Stake veAWP via awp-skill before next Wednesday's snapshot.",
+                status=404,
+            )
+    except (TypeError, ValueError, ArithmeticError):
+        # 不能解析就当成 0，让 server 自己判
+        pass
 
 
 def _confirm_block(args, market: dict, idem_key: str) -> str:
@@ -109,7 +149,11 @@ def main() -> int:
     if args.kind == "market" and args.post_only:
         ap.error("--post-only is invalid with market kind")
 
+    # OpenAPI `CreateOrderRequest` 没把 market_id 标 required，但生产服务端
+    # 实际要求（server-side validation 比 spec 严）。带上 market_id 之前
+    # 提交直接 422 missing field。
     body = {
+        "market_id": args.market,
         "worknet_id": args.worknet,
         "side": args.side,
         "kind": args.kind,
@@ -131,14 +175,17 @@ def main() -> int:
 
     try:
         market = _phase_check(args.market)
+        principal = wallet_address()
+        # power 预检 —— 比 phase check 后做，因为 power 失败的引导（去 awp-skill
+        # 质押）只在 epoch 的"开窗前"这段时间有意义；phase 已挂就先报 phase。
+        _power_check(principal, args.market)
         if not confirm(_confirm_block(args, market, args.idem_key), yes=args.yes):
             print(json.dumps({"cancelled": True}))
             return 0
-        principal = wallet_address()
         data = signed_request(
             "POST",
             sign_path="/orders",
-            full_path="/v1/orders",
+            full_path="/orders",
             body=body,
             principal=principal,
             idempotency_key=args.idem_key,

@@ -57,7 +57,7 @@ def main() -> int:
         data = signed_request(
             "POST",
             sign_path="/comments",
-            full_path="/v1/comments",
+            full_path="/comments",
             body=body,
             idempotency_key=args.idem_key,
         )

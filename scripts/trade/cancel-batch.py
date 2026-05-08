@@ -52,7 +52,7 @@ def main() -> int:
         data = signed_request(
             "POST",
             sign_path="/orders/cancel-batch",
-            full_path="/v1/orders/cancel-batch",
+            full_path="/orders/cancel-batch",
             body={"order_ids": ids},
         )
     except EmgError as e:

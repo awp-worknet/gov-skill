@@ -76,21 +76,21 @@ def main() -> int:
 
     try:
         if args.cmd == "current":
-            data = fetch("GET", "/v1/epochs/current")
+            data = fetch("GET", "/epochs/current")
         elif args.cmd == "get":
-            data = fetch("GET", f"/v1/epochs/{args.id}")
+            data = fetch("GET", f"/epochs/{args.id}")
         elif args.cmd == "phase":
-            data = fetch("GET", f"/v1/epochs/{args.id}/phase")
+            data = fetch("GET", f"/epochs/{args.id}/phase")
         elif args.cmd == "results":
-            data = fetch("GET", f"/v1/epochs/{args.id}/results")
+            data = fetch("GET", f"/epochs/{args.id}/results")
         elif args.cmd == "voters":
-            data = _maybe_paginate(args, f"/v1/epochs/{args.id}/voters")
+            data = _maybe_paginate(args, f"/epochs/{args.id}/voters")
         elif args.cmd == "merkle":
-            data = fetch("GET", f"/v1/epochs/{args.id}/merkle-root")
+            data = fetch("GET", f"/epochs/{args.id}/merkle-root")
         elif args.cmd == "proof":
-            data = fetch("GET", f"/v1/epochs/{args.id}/votes/{args.principal}/proof")
+            data = fetch("GET", f"/epochs/{args.id}/votes/{args.principal}/proof")
         elif args.cmd == "history":
-            data = _maybe_paginate(args, f"/v1/epochs/{args.id}/votes/{args.principal}/history")
+            data = _maybe_paginate(args, f"/epochs/{args.id}/votes/{args.principal}/history")
         else:
             ap.error(f"unknown subcommand {args.cmd}")
     except EmgError as e:

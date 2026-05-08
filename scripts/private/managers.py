@@ -20,7 +20,7 @@ def main() -> int:
     args = ap.parse_args()
     try:
         principal = args.principal or wallet_address()
-        data = fetch("GET", f"/v1/principals/{principal}/managers")
+        data = fetch("GET", f"/principals/{principal}/managers")
     except EmgError as e:
         return emit_error(e)
     print(json.dumps(data, indent=2))
