@@ -144,14 +144,15 @@ def main() -> int:
             timestamp=timestamp,
             auth_info=auth_info,
         )
-        # 同时发 nonce + vote_revision 字段：openapi.yaml 仍把 nonce 标 required，
-        # SKILL_API_LATEST 提到 vote_revision 是新名字。两个都带保险，多发的字段
-        # 服务端会忽略；少发会被 schema 拒。
+        # OpenAPI SignedVoteRequest 显式列出的字段：vote / prediction /
+        # nonce / signature。服务端把 body.nonce 内部 map 到新模型的
+        # vote_revision；客户端只发 spec 声明的字段，避免 strict-validation
+        # 服务端拒掉 unknown `vote_revision`。`vote_revision` 仍然出现在
+        # EMGVote typed-data 里 —— 那是签名材料，不是 body 字段。
         body = {
             "vote": [format(v, "f") for v in vote],
             "prediction": [format(v, "f") for v in pred],
             "nonce": revision,
-            "vote_revision": revision,
             "signature": inner_sig,
         }
         data = signed_request(

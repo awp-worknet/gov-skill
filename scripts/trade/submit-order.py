@@ -71,9 +71,10 @@ def _power_check(principal: str, market_id: int) -> None:
         if e.status == 404:
             raise EmgError(
                 "STATE_PRINCIPAL_NOT_IN_EPOCH",
-                "你在本 epoch 没有 AWP Power（snapshot 在每周三 12:00 UTC 锁定）。"
-                "需要先经 awp-skill 把 AWP 质押成 veAWP 才能拿到 Power，"
-                "等下次 epoch 开启后才生效。",
+                f"No AWP Power for principal in market {market_id}. "
+                "AWP Power is snapshotted every Wednesday 12:00 UTC. "
+                "Stake AWP into a veAWP position via awp-skill, then wait "
+                "for the next epoch open for the snapshot to take effect.",
                 status=404,
             )
         raise
@@ -83,7 +84,7 @@ def _power_check(principal: str, market_id: int) -> None:
         if Decimal(str(total)) <= 0:
             raise EmgError(
                 "STATE_PRINCIPAL_NOT_IN_EPOCH",
-                f"AWP Power for epoch {market_id} is {total} — no chips this week. "
+                f"AWP Power for market {market_id} is {total} — no chips this epoch. "
                 "Stake veAWP via awp-skill before next Wednesday's snapshot.",
                 status=404,
             )
