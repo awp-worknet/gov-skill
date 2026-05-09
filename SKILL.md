@@ -113,10 +113,10 @@ $ python3 scripts/helpers/what-can-i-do.py
 | `public/epochs.py`                      | GET    | `/v1/epochs/current`, `/v1/epochs/{id}`, `…/phase`, `…/results`, `…/voters`†, `…/votes/{principal}/history`† | —    |
 | `public/leaderboard.py`†                | GET    | `/v1/leaderboard/epistemic`                                     | —    |
 | `public/merkle.py`                      | GET    | `/v1/epochs/{id}/merkle-root`, `…/votes/{principal}/proof`       | —    |
-| `private/state.py`                      | GET    | `/v1/principals/{me}/state`                                     | sig  |
-| `private/power.py`                      | GET    | `/v1/principals/{me}/power`                                     | sig  |
-| `private/managers.py`                   | GET    | `/v1/principals/{me}/managers`                                  | sig  |
-| `private/recipient.py`                  | GET    | `/v1/principals/{me}/recipient`                                 | sig  |
+| `private/state.py`                      | GET    | `/v1/principals/{me}/state`                                     | sig‡ |
+| `private/power.py`                      | GET    | `/v1/principals/{me}/power`                                     | sig‡ |
+| `private/managers.py`                   | GET    | `/v1/principals/{me}/managers`                                  | sig‡ |
+| `private/recipient.py`                  | GET    | `/v1/principals/{me}/recipient`                                 | sig‡ |
 | `private/orders-list.py`†               | GET    | `/v1/orders`                                                    | sig  |
 | `private/orders-get.py`                 | GET    | `/v1/orders/{id}`                                               | sig  |
 | `private/fills-list.py`†                | GET    | `/v1/fills` (cursor-paginated, self-only)                        | sig  |
@@ -151,6 +151,13 @@ into one response. `has_more === false` is the authoritative stop signal
 output carries `truncated_at_max_pages: true` plus `next_cursor` for resume.
 Private listings still cost one nonce per page (each page is a separately-signed
 request) — don't blindly enable `--all-pages` on huge listings.
+
+Endpoints marked **sig‡** carry `security: []` in OpenAPI (documented as
+public reads) but production actually requires EMG-SIG-V1 — the skill
+signs them anyway. The OpenAPI lag is a known doc/server drift; reproduce
+the auth-required behavior in any reimplementation. The query parameter
+on `/principals/.../state`, `/principals/.../power`, `/principals/.../recipient`
+is canonical `market_id`; `epoch_id` is accepted as an alias post-9387e78.
 
 ---
 
@@ -248,7 +255,7 @@ retry policy:
 | `BUSINESS_VOTE_ALREADY_FINAL`                     | Phase 1 closed; show `phase_closed_at`.                                                              |
 | `BUSINESS_NOT_WORKNET_OPERATOR`                   | Only the worknet's configured operator may submit reports.                                          |
 | `BUSINESS_ORDER_NOT_FOUND` / `BUSINESS_ORDER_NOT_OWNED` | 404 vs 403 — distinguish "doesn't exist" from "exists but yours".                              |
-| `STATE_PRINCIPAL_NOT_IN_EPOCH`                    | Suggest `awp-skill` to stake veAWP for next epoch.                                                  |
+| `STATE_PRINCIPAL_NOT_IN_EPOCH`                    | Three causes (indistinguishable from response): no veAWP at all (stake via awp-skill), or lock_end too close to epoch settlement (extend via veAWP.addToPosition), or snapshot indexer miss (escalate). Cross-check on-chain veAWP.getVotingPower before suggesting "go stake". |
 | `STATE_VOTES_NOT_REVEALED`                        | Phase 2→3 boundary hasn't fired; tell user to retry after settlement starts.                        |
 | `STATE_RESULTS_NOT_FOUND`                         | Tell user to retry after settlement window.                                                         |
 | `IDEMPOTENCY_KEY_REUSE` *(post-H3, 422)*          | Same `X-Idempotency-Key` reused with different body. Generate fresh key, do NOT auto-retry. Replaces pre-2026-05 `STATE_IDEMPOTENCY_KEY_MISMATCH` (409). |

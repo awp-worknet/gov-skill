@@ -102,7 +102,7 @@ dispatches on `code` (machine-stable, ADR-006 codebook) and surfaces
 | `STATE_VOTES_NOT_REVEALED`            | Trying to read votes before settlement reveal gate fired.               |
 | `STATE_COMMIT_NOT_FOUND`              | Merkle root not yet committed.                                          |
 | `STATE_RESULTS_NOT_FOUND`             | Settlement not yet complete. Tell user to retry after settlement.       |
-| `STATE_PRINCIPAL_NOT_IN_EPOCH`        | No AWP Power → no chips. Hint at `awp-skill` for staking.               |
+| `STATE_PRINCIPAL_NOT_IN_EPOCH`        | Principal missing from the market's AWP Power snapshot. **Three possible causes**, indistinguishable from this response alone — cross-check on-chain veAWP before assuming "go stake": (a) no veAWP position at all → stake via awp-skill; (b) position exists but `lock_end` ≤ epoch settlement window — extend lock via veAWP.addToPosition (positions whose lock expires before the epoch fully settles are excluded by design); (c) snapshot indexer missed an eligible position — escalate to protocol team. The skill SHOULD NOT auto-prompt "go stake" without first confirming (a) is the actual cause. |
 | `STATE_VOTE_NOT_FOUND`                | Principal didn't submit a vote in this epoch.                           |
 
 ### Idempotency (`IDEMPOTENCY_*`) — HTTP 422 (post-H3, 2026-05-08)

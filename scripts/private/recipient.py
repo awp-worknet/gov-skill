@@ -1,9 +1,14 @@
 #!/usr/bin/env python3
 """GET /v1/principals/{me}/recipient — who actually receives Gov Tokens at settlement.
 
-    recipient.py [--principal 0x…] [--epoch <id>]
+    recipient.py [--principal 0x…] [--market <id>]
 
 Only available after the epoch has settled; un-settled returns 404.
+
+Despite OpenAPI marking this `security: []` (public read), production
+requires EMG-SIG-V1 — the script signs accordingly. The query param's
+canonical name is `market_id` (server now also accepts `epoch_id` as an
+alias post-9387e78).
 """
 from __future__ import annotations
 
@@ -13,20 +18,25 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from lib.govnet_lib import EmgError, emit_error, fetch, wallet_address  # noqa: E402
+from lib.govnet_lib import EmgError, emit_error, signed_request, wallet_address  # noqa: E402
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser(description=__doc__)
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--principal")
-    ap.add_argument("--epoch", type=int)
+    ap.add_argument("--market", type=int, help="market_id (preferred name)")
+    ap.add_argument("--epoch", type=int, help="alias for --market (legacy)")
     args = ap.parse_args()
+    market_id = args.market if args.market is not None else args.epoch
     try:
         principal = args.principal or wallet_address()
-        data = fetch(
+        params = {"market_id": market_id} if market_id is not None else None
+        data = signed_request(
             "GET",
-            f"/principals/{principal}/recipient",
-            params={"epoch_id": args.epoch},
+            sign_path=f"/principals/{principal}/recipient",
+            full_path=f"/principals/{principal}/recipient",
+            query_params=params,
+            principal=principal,
         )
     except EmgError as e:
         return emit_error(e)
