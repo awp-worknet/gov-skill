@@ -248,6 +248,45 @@ Response `results[]` is a heterogeneous array — each element is either a
 
 ---
 
+## Principal-scoped reads (sig despite OpenAPI saying public)
+
+OpenAPI marks the `/v1/principals/{addr}/*` GET endpoints with
+`security: []` (public read). **Production actually requires EMG-SIG-V1**;
+the skill signs every call. This is a known doc/server drift to keep in
+mind for any reimplementation.
+
+The query parameter for selecting an epoch is canonically `market_id`;
+the server also accepts `epoch_id` as an alias (post-9387e78).
+
+### `GET /v1/principals/{addr}/state[?market_id=N]`
+
+Per-market chips + worknet share holdings + last-settled epoch. Three
+reads parallelized server-side (M-H2). Used by `private/state.py`.
+
+### `GET /v1/principals/{addr}/power[?market_id=N]`
+
+AWP Power snapshot for the given market. `total_voting_power` is in
+scale-18 string-decimal across all chains; `per_chain[]` breaks down
+per-chain veAWP positions for audit.
+
+A 404 `STATE_PRINCIPAL_NOT_IN_EPOCH` has three possible causes — see
+`references/error-codes.md` for the disambiguation. Don't auto-prompt
+"go stake" without verifying on-chain.
+
+### `GET /v1/principals/{addr}/managers`
+
+Currently authorized Managers (read from AWPRegistry on-chain via
+api.awp.sh). The response includes `checked_at`; a value of
+`1970-01-01T00:00:00Z` means the indexer has never resolved this row
+— escalate as a data-freshness incident.
+
+### `GET /v1/principals/{addr}/recipient[?market_id=N]`
+
+Resolved gov-token recipient at settlement. 404 until the epoch has
+settled.
+
+---
+
 ## Positions
 
 ### `POST /v1/positions/split` / `merge`

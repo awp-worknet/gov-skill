@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
 """GET /v1/leaderboard/epistemic — Stakers ranked by epistemic score.
 
-    leaderboard.py                     # current epoch, first page
-    leaderboard.py --epoch 5           # specific epoch
-    leaderboard.py --epoch 5 --limit 50
+    leaderboard.py                     # current market, first page
+    leaderboard.py --market 5          # specific market
+    leaderboard.py --market 5 --limit 50
     leaderboard.py --all-pages         # auto-walk every page
     leaderboard.py --cursor <opaque>   # relay from a previous next_cursor
+
+The query param is `market_id` per `SKILL_API_LATEST.md` §1.1; `--epoch`
+remains accepted as a legacy alias.
 
 In `--all-pages` mode the response is `{ data: [...merged...], page_count: N }`;
 when `--max-pages` (default 100) is exceeded, `truncated_at_max_pages: true`
@@ -23,8 +26,9 @@ from lib.govnet_lib import EmgError, emit_error, fetch, paginate_all  # noqa: E4
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--epoch", type=int)
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--market", type=int, help="market_id (preferred name)")
+    ap.add_argument("--epoch", type=int, help="alias for --market (legacy)")
     ap.add_argument("--limit", type=int, default=100)
     ap.add_argument("--cursor", default=None)
     ap.add_argument("--all-pages", action="store_true",
@@ -32,8 +36,11 @@ def main() -> int:
     ap.add_argument("--max-pages", type=int, default=100,
                     help="safety cap when --all-pages")
     args = ap.parse_args()
+    market_id = args.market if args.market is not None else args.epoch
 
-    params = {"epoch_id": args.epoch, "limit": args.limit}
+    params = {"limit": args.limit}
+    if market_id is not None:
+        params["market_id"] = market_id
     if args.cursor:
         params["cursor"] = args.cursor
 

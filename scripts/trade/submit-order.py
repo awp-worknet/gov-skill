@@ -30,7 +30,6 @@ from lib.govnet_lib import (  # noqa: E402
     EmgError,
     confirm,
     emit_error,
-    fetch,
     fetch_market,
     fmt_amount,
     fmt_price,
@@ -57,26 +56,47 @@ def _phase_check(market_id: int) -> dict:
 
 
 def _power_check(principal: str, market_id: int) -> None:
-    """Before submitting an order, verify the principal has AWP Power in this epoch.
+    """Before submitting an order, verify the principal has AWP Power in this market.
 
-    The production server currently returns 500 for orders from zero-power users:
-    `INTERNAL_UNEXPECTED_STATE: principal not initialized before reserve_for_buy`
-    (a server-side bug — it should be 404 STATE_PRINCIPAL_NOT_IN_EPOCH). The
-    client GETs /principals/{me}/power up front to intercept this case, gives
-    the user a friendly message, and avoids burning a nonce on an inscrutable 500.
+    The production server returns 500 INTERNAL_UNEXPECTED_STATE
+    (`principal not initialized before reserve_for_buy`) on orders from
+    principals missing from the epoch's power snapshot — surface it as
+    a clean 404 STATE_PRINCIPAL_NOT_IN_EPOCH up front to avoid burning
+    a nonce on an inscrutable 500.
+
+    /principals/{me}/power requires EMG-SIG-V1 (despite OpenAPI marking
+    `security: []`); query param is `market_id` (canonical) — server now
+    accepts `epoch_id` as an alias too.
+
+    A 404 from this endpoint can mean any of:
+      a) No veAWP position at all → stake via awp-skill
+      b) Position exists but lock_end is too close to / earlier than the
+         epoch's settlement window → extend lock via veAWP.addToPosition
+      c) Position exists with adequate lock but server snapshot indexer
+         missed it (rare race condition) → escalate to protocol team
+
+    The skill can't reliably distinguish (a)/(b)/(c) from /power's response
+    alone — it would need an on-chain veAWP read. Surface the ambiguity
+    in the error message rather than asserting a specific remedy.
     """
     try:
-        power = fetch("GET", f"/principals/{principal}/power",
-                     params={"epoch_id": market_id})
+        power = signed_request(
+            "GET",
+            sign_path=f"/principals/{principal}/power",
+            full_path=f"/principals/{principal}/power",
+            query_params={"market_id": market_id},
+            principal=principal,
+        )
     except EmgError as e:
-        # Translate 404 directly; pass other errors through without masking
         if e.status == 404:
             raise EmgError(
                 "STATE_PRINCIPAL_NOT_IN_EPOCH",
-                f"No AWP Power for principal in market {market_id}. "
-                "AWP Power is snapshotted every Wednesday 12:00 UTC. "
-                "Stake AWP into a veAWP position via awp-skill, then wait "
-                "for the next epoch open for the snapshot to take effect.",
+                f"Principal not in market {market_id}'s AWP Power snapshot. "
+                "Possible causes: (a) no veAWP position — stake via awp-skill; "
+                "(b) lock_end too close to epoch settlement — extend lock via "
+                "veAWP.addToPosition; (c) snapshot indexer missed the position "
+                "(rare). Cross-check on-chain veAWP.getVotingPower(tokenId) "
+                "before deciding remedy.",
                 status=404,
             )
         raise
@@ -86,12 +106,11 @@ def _power_check(principal: str, market_id: int) -> None:
         if Decimal(str(total)) <= 0:
             raise EmgError(
                 "STATE_PRINCIPAL_NOT_IN_EPOCH",
-                f"AWP Power for market {market_id} is {total} — no chips this epoch. "
-                "Stake veAWP via awp-skill before next Wednesday's snapshot.",
+                f"AWP Power for market {market_id} is {total} — no chips this epoch.",
                 status=404,
             )
     except (TypeError, ValueError, ArithmeticError):
-        # If we can't parse, treat as 0 and let the server decide
+        # If we can't parse, let the server decide (don't mask)
         pass
 
 
